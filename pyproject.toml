@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tsx60-iv-surface"
+version = "0.1.0"
+description = "Quantitative modeling of the XIU.TO implied volatility surface"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "mlflow",
+    "numpy",
+    "pandas",
+    "plotly",
+    "pyarrow",
+    "scipy",
+    "uvicorn",
+    "yfinance",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis",
+    "pytest",
+    "ruff",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tsx60_iv"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "D"]
+ignore = ["D100", "D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
