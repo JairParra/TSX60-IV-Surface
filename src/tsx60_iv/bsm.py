@@ -1,6 +1,5 @@
 """Forward Black-Scholes-Merton pricing, Greeks, and volatility inversion."""
 
-from collections.abc import Mapping
 from typing import Literal
 
 import numpy as np
@@ -21,13 +20,16 @@ def _inputs(
 ) -> tuple[FloatArray, ...]:
     """Broadcast and validate BSM inputs."""
     values = np.broadcast_arrays(
-        *(np.asarray(value, dtype=float) for value in (
-            forward,
-            strike,
-            time_to_expiry,
-            discount,
-            volatility,
-        ))
+        *(
+            np.asarray(value, dtype=float)
+            for value in (
+                forward,
+                strike,
+                time_to_expiry,
+                discount,
+                volatility,
+            )
+        )
     )
     forward_array, strike_array, time_array, discount_array, vol_array = values
     if np.any(forward_array <= 0) or np.any(strike_array <= 0):
@@ -147,28 +149,23 @@ def implied_volatility(
     rejected because they have no finite, positive-volatility solution.
     """
     market, f, k, time, disc = np.broadcast_arrays(
-        *(np.asarray(value, dtype=float) for value in (
-            price,
-            forward,
-            strike,
-            time_to_expiry,
-            discount,
-        ))
+        *(
+            np.asarray(value, dtype=float)
+            for value in (
+                price,
+                forward,
+                strike,
+                time_to_expiry,
+                discount,
+            )
+        )
     )
     if option_type not in ("call", "put"):
         raise ValueError("option_type must be 'call' or 'put'")
-    if (
-        np.any(f <= 0)
-        or np.any(k <= 0)
-        or np.any(time <= 0)
-        or np.any(disc <= 0)
-        or np.any(disc > 1)
-    ):
+    if np.any(f <= 0) or np.any(k <= 0) or np.any(time <= 0) or np.any(disc <= 0):
         raise ValueError("forward, strike, time and discount must be valid")
     intrinsic = disc * (
-        np.maximum(f - k, 0.0)
-        if option_type == "call"
-        else np.maximum(k - f, 0.0)
+        np.maximum(f - k, 0.0) if option_type == "call" else np.maximum(k - f, 0.0)
     )
     upper = disc * (f if option_type == "call" else k)
     valid = (market > intrinsic) & (market < upper) & np.isfinite(market)
@@ -182,11 +179,22 @@ def implied_volatility(
     for index, (market_price, fwd, strike_price, expiry, df) in enumerate(
         zip(flat_market, flat_f, flat_k, flat_t, flat_d, strict=True)
     ):
-        roots[index] = brentq(
-            lambda sigma: float(
-                bsm_price(fwd, strike_price, expiry, df, sigma, option_type)
+
+        def objective(
+            sigma: float,
+            fwd: float = fwd,
+            strike_price: float = strike_price,
+            expiry: float = expiry,
+            df: float = df,
+            market_price: float = market_price,
+        ) -> float:
+            return (
+                float(bsm_price(fwd, strike_price, expiry, df, sigma, option_type))
+                - market_price
             )
-            - market_price,
+
+        roots[index] = brentq(
+            objective,
             1e-5,
             5.0,
         )

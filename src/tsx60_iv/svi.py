@@ -20,9 +20,7 @@ def raw_svi_variance(
     if a + b * sigma * np.sqrt(1.0 - rho**2) < 0:
         raise ValueError("SVI parameterization has negative minimum variance")
     x = np.asarray(k, dtype=float)
-    return a + b * (
-        rho * (x - m) + np.sqrt((x - m) ** 2 + sigma**2)
-    )
+    return a + b * (rho * (x - m) + np.sqrt((x - m) ** 2 + sigma**2))
 
 
 def check_butterfly_arbitrage(

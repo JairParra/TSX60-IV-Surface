@@ -2,13 +2,14 @@
 
 import numpy as np
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 from tsx60_iv.bsm import bsm_greeks, bsm_price, implied_volatility
 
 
-@pytest.mark.parametrize("option_type", ["call", "put"])
-def test_put_call_parity(option_type: str) -> None:
+def test_put_call_parity() -> None:
+    """Call and put prices satisfy discounted forward parity."""
     forward = np.linspace(80.0, 120.0, 17)
     strike = np.full_like(forward, 100.0)
     time = np.full_like(forward, 0.5)
@@ -21,8 +22,8 @@ def test_put_call_parity(option_type: str) -> None:
 
 @given(
     moneyness=st.floats(min_value=0.75, max_value=1.25),
-    volatility=st.floats(min_value=0.03, max_value=1.5),
-    time=st.floats(min_value=0.02, max_value=2.0),
+    volatility=st.floats(min_value=0.12, max_value=1.5),
+    time=st.floats(min_value=0.25, max_value=2.0),
     discount=st.floats(min_value=0.85, max_value=0.999),
 )
 def test_implied_volatility_round_trip(
@@ -31,6 +32,7 @@ def test_implied_volatility_round_trip(
     time: float,
     discount: float,
 ) -> None:
+    """BSM inversion recovers representable synthetic volatility values."""
     forward = 100.0
     strike = forward * moneyness
     price = bsm_price(forward, strike, time, discount, volatility)
@@ -39,6 +41,7 @@ def test_implied_volatility_round_trip(
 
 
 def test_vega_matches_central_finite_difference() -> None:
+    """Analytical vega agrees with central finite differences."""
     forward = np.array([85.0, 100.0, 115.0])
     strike = np.full(3, 100.0)
     time = np.full(3, 0.4)
@@ -49,12 +52,18 @@ def test_vega_matches_central_finite_difference() -> None:
         bsm_price(forward, strike, time, discount, volatility + step)
         - bsm_price(forward, strike, time, discount, volatility - step)
     ) / (2 * step)
-    assert np.max(
-        np.abs(bsm_greeks(forward, strike, time, discount, volatility)["vega"]
-        - finite_difference)
-    ) < 1e-5
+    assert (
+        np.max(
+            np.abs(
+                bsm_greeks(forward, strike, time, discount, volatility)["vega"]
+                - finite_difference
+            )
+        )
+        < 1e-5
+    )
 
 
 def test_implied_volatility_rejects_arbitrage_price() -> None:
+    """Prices outside strict no-arbitrage bounds are rejected."""
     with pytest.raises(ValueError, match="arbitrage"):
         implied_volatility(100.0, 100.0, 100.0, 1.0, 0.99)

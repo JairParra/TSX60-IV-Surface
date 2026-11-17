@@ -1,6 +1,6 @@
 """Option-chain acquisition and forward estimation."""
 
-from datetime import datetime
+from datetime import date
 from pathlib import Path
 from typing import Final
 
@@ -97,9 +97,10 @@ def estimate_forward_and_rates(
     if spot <= 0 or not np.isfinite(spot):
         raise ValueError("spot must be positive and finite")
     clean = _filter_quoted_chain(chain_df)
-    as_of = pd.Timestamp(
-        chain_df.get("as_of", pd.Series([datetime.utcnow().date()])).iloc[0]
-    ).normalize()
+    if "as_of" in chain_df:
+        as_of = pd.Timestamp(chain_df["as_of"].iloc[0]).normalize()
+    else:
+        as_of = pd.Timestamp(date.today())
     clean["expiration"] = pd.to_datetime(clean["expiration"])
     clean["time_to_expiry"] = (clean["expiration"] - as_of).dt.days / 365.0
     if np.any(clean["time_to_expiry"] <= 0):
@@ -112,15 +113,16 @@ def estimate_forward_and_rates(
         on=["expiration", "strike"],
         suffixes=("_call", "_put"),
     )
-    pairs["forward_estimate"] = pairs["strike"] + (
-        pairs["mid_call"] - pairs["mid_put"]
-    ) / pairs["discount"]
+    pairs["forward_estimate"] = (
+        pairs["strike"] + (pairs["mid_call"] - pairs["mid_put"]) / pairs["discount"]
+    )
     pairs["distance"] = abs(pairs["strike"] - spot)
     if pairs.empty:
         clean["forward"] = spot * np.exp(r_cad * clean["time_to_expiry"])
     else:
         ranked = pairs.sort_values(["expiration", "distance"])
-        forwards = ranked.groupby("expiration")["forward_estimate"].median()
+        near_atm = ranked.groupby("expiration", group_keys=False).head(3)
+        forwards = near_atm.groupby("expiration")["forward_estimate"].median()
         clean["forward"] = clean["expiration"].map(forwards)
         clean["forward"] = clean["forward"].fillna(
             spot * np.exp(r_cad * clean["time_to_expiry"])

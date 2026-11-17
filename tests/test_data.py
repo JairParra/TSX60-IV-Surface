@@ -11,8 +11,12 @@ FIXTURE = Path(__file__).parent / "fixtures" / "xiu_sample_chain.parquet"
 
 
 def test_fixture_contains_four_expirations() -> None:
+    """Fixture covers the intended deterministic maturity grid."""
     chain = pd.read_parquet(FIXTURE)
-    assert set((pd.to_datetime(chain["expiration"]) - pd.Timestamp(chain["as_of"].iloc[0])).dt.days) == {
+    days = (
+        pd.to_datetime(chain["expiration"]) - pd.Timestamp(chain["as_of"].iloc[0])
+    ).dt.days
+    assert set(days) == {
         14,
         30,
         60,
@@ -21,6 +25,7 @@ def test_fixture_contains_four_expirations() -> None:
 
 
 def test_zero_bid_and_crossed_markets_are_rejected() -> None:
+    """Only positive, uncrossed, sufficiently liquid quotes survive."""
     quotes = pd.DataFrame(
         {
             "strike": [38.0, 38.0, 38.0, 38.0],
@@ -36,6 +41,7 @@ def test_zero_bid_and_crossed_markets_are_rejected() -> None:
 
 
 def test_forward_estimation_preserves_put_call_parity() -> None:
+    """Estimated forwards explain paired quote parity within bid-ask spread."""
     chain = pd.read_parquet(FIXTURE)
     enriched = estimate_forward_and_rates(chain, spot=38.50)
     assert np.all(np.isfinite(enriched["log_moneyness"]))
@@ -45,8 +51,7 @@ def test_forward_estimation_preserves_put_call_parity() -> None:
         suffixes=("_call", "_put"),
     )
     pairs = pairs.loc[
-        (pairs["option_type_call"] == "call")
-        & (pairs["option_type_put"] == "put")
+        (pairs["option_type_call"] == "call") & (pairs["option_type_put"] == "put")
     ]
     residual = (
         pairs["mid_call"]
