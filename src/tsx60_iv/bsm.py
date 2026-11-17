@@ -193,10 +193,13 @@ def implied_volatility(
                 - market_price
             )
 
-        roots[index] = brentq(
-            objective,
-            1e-5,
-            5.0,
-        )
+        min_vol = 1e-5
+        max_vol = 5.0
+        try:
+            roots[index] = brentq(objective, min_vol, max_vol)
+        except ValueError as exc:
+            raise ValueError(
+                "implied volatility has no solution in [1e-5, 5.0]; price may be outside the solver bracket"
+            ) from exc
     roots = roots.reshape(market.shape)
     return roots.item() if roots.ndim == 0 else roots
