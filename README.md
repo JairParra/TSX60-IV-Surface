@@ -1,2 +1,127 @@
-# TSX60-IV-Surface
-TSX-60 Implied Volatility Surface &amp; SVI Calibration Engine
+# tsx60-iv-surface
+
+A production-oriented Python library for modeling, calibrating, and serving the
+implied volatility surface of the Canadian S&P/TSX 60 Index through liquid
+`XIU.TO` (iShares S&P/TSX 60 Index ETF) option chains.
+
+## Project Overview & Architecture
+
+The package is intentionally small: data ingestion produces normalized quotes;
+forward BSM routines calculate prices, Greeks, and implied volatility; SVI is
+the slice-calibration boundary; and MLflow/FastAPI handle experiment tracking
+and serving.
+
+```mermaid
+flowchart LR
+    Y[Yahoo Finance XIU.TO] --> D[data.py: filtered chain]
+    F[Cached Parquet] --> D
+    D --> P[Put-call parity / F and log-moneyness]
+    P --> B[bsm.py: IV and Greeks]
+    B --> S[svi.py: Raw SVI calibration]
+    S --> M[tracking.py: MLflow]
+    S --> A[api.py: FastAPI surface]
+```
+
+The `src/tsx60_iv` package keeps numerical logic separate from external I/O.
+Tests use a checked-in synthetic chain, so unit and property tests are fully
+offline and deterministic.
+
+## Mathematical Formulation
+
+### Forward Black-Scholes-Merton Pricing & Log-Moneyness
+
+Let $F(T)$ be the forward, $D(T)=e^{-rT}$ the discount factor, and
+$k=\ln(K/F(T))$. Under forward BSM:
+
+$$
+C(K, T) = D(T)\left[F(T)\Phi(d_1) - K\Phi(d_2)\right],
+\quad d_{1,2} = \frac{-k \pm \frac{1}{2}\sigma^2 T}{\sigma\sqrt{T}}.
+$$
+
+For puts:
+
+$$
+P(K,T)=D(T)\left[K\Phi(-d_2)-F(T)\Phi(-d_1)\right].
+$$
+
+Put-call parity,
+$C(K,T)-P(K,T)=D(T)(F(T)-K)$, is used to infer the expiry forward from
+near-ATM paired quotes.
+
+### Implied Volatility Inversion
+
+Market implied volatility is the root of
+
+$$
+f(\sigma_{\text{imp}})=
+C_{\text{BSM}}(F,K,T,\sigma_{\text{imp}})-C_{\text{mkt}}=0.
+$$
+
+The solver uses Brent's method on $[10^{-5},5.0]$. A call is accepted only when
+
+$$
+D(T)\max(F-K,0) < C_{\text{mkt}} < D(T)F,
+$$
+
+with the analogous finite put bounds. Violations are errors, never clipped.
+
+### Gatheral's Raw SVI
+
+The Raw SVI total implied variance is
+
+$$
+w(k;\chi)=a+b\left[\rho(k-m)+
+\sqrt{(k-m)^2+\sigma^2}\right],
+\quad \chi=\{a,b,\rho,m,\sigma\}.
+$$
+
+Its domain requires $b\geq0$, $|\rho|<1$, $\sigma>0$, and
+$a+b\sigma\sqrt{1-\rho^2}\geq0$. The calibration implementation is a
+documented stub; the parameterization and validation are available now.
+
+### Static No-Arbitrage Conditions
+
+Durrleman's butterfly condition checks pointwise nonnegativity of
+
+$$
+g(k)=\left(1-\frac{k w'(k)}{2w(k)}\right)^2-
+\frac{w'(k)^2}{4}\left(\frac{1}{w(k)}+\frac{1}{4}\right)+
+\frac{w''(k)}{2}\geq0.
+$$
+
+Across expirations, calendar monotonicity requires
+
+$$
+\frac{\partial w(k,T)}{\partial T}\geq0.
+$$
+
+Neither condition should be repaired by silently clipping prices or
+parameters.
+
+## Quickstart
+
+Python 3.12+ and `uv` are required:
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+```
+
+Generate the offline fixture, or fetch and cache a live `XIU.TO` chain:
+
+```bash
+uv run python tests/fixtures/generate_xiu_sample.py
+uv run python -m tsx60_iv.data
+```
+
+The live command writes `data/xiu_chain.parquet`; normal CI never performs a
+network request.
+
+## Development Invariants
+
+- All option prices are denominated in CAD with forward $F(T)$ inputs.
+- Volatility inversions reject intrinsic-value boundary and crossed-market
+  arbitrages.
+- Put-call parity and nonnegative total variance are numerical invariants.
+- Fixture-based tests are deterministic; only explicit data ingestion is live.
