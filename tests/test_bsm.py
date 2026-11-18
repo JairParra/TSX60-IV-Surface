@@ -67,3 +67,34 @@ def test_implied_volatility_rejects_arbitrage_price() -> None:
     """Prices outside strict no-arbitrage bounds are rejected."""
     with pytest.raises(ValueError, match="arbitrage"):
         implied_volatility(100.0, 100.0, 100.0, 1.0, 0.99)
+
+
+@pytest.mark.parametrize("option_type", ["call", "put"])
+def test_greeks_match_central_finite_differences(option_type: str) -> None:
+    """Delta, gamma, vanna and volga agree with finite differences."""
+    f, k, t, d, s, h = 100.0, 95.0, 0.5, 0.98, 0.3, 1e-4
+
+    def price(fwd: float, vol: float) -> float:
+        return float(bsm_price(fwd, k, t, d, vol, option_type))  # type: ignore[arg-type]
+
+    def greeks(fwd: float, vol: float) -> dict[str, float]:
+        return bsm_greeks(fwd, k, t, d, vol, option_type)  # type: ignore[arg-type,return-value]
+
+    g = greeks(f, s)
+    delta = (price(f + h, s) - price(f - h, s)) / (2 * h)
+    hg = 1e-2  # second difference needs a wider step to beat round-off
+    gamma = (price(f + hg, s) - 2 * price(f, s) + price(f - hg, s)) / hg**2
+    vanna = (greeks(f, s + h)["delta"] - greeks(f, s - h)["delta"]) / (2 * h)
+    volga = (greeks(f, s + h)["vega"] - greeks(f, s - h)["vega"]) / (2 * h)
+    assert g["delta"] == pytest.approx(delta, abs=1e-5)
+    assert g["gamma"] == pytest.approx(gamma, rel=1e-5)
+    assert g["vanna"] == pytest.approx(vanna, abs=1e-5)
+    assert g["volga"] == pytest.approx(volga, abs=1e-5)
+
+
+def test_non_finite_inputs_raise() -> None:
+    """NaN time and infinite volatility are rejected."""
+    with pytest.raises(ValueError, match="finite"):
+        bsm_price(100.0, 100.0, np.nan, 1.0, 0.2)
+    with pytest.raises(ValueError, match="finite"):
+        bsm_price(100.0, 100.0, 1.0, 1.0, np.inf)

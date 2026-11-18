@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 app = FastAPI(title="TSX60 IV Surface")
 _surface: dict[str, Any] | None = None
@@ -23,4 +23,6 @@ def health() -> dict[str, str]:
 @app.get("/surface")
 def surface() -> dict[str, Any]:
     """Return the latest loaded surface."""
-    return _surface or {}
+    if _surface is None:
+        raise HTTPException(status_code=503, detail="surface not loaded")
+    return _surface

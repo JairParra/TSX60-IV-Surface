@@ -11,7 +11,7 @@
 
 - `src/tsx60_iv/data.py`: `yfinance` ingestion, quote quality, forwards/rates.
 - `src/tsx60_iv/bsm.py`: forward Black-Scholes pricing, Greeks, IV inversion.
-- `src/tsx60_iv/svi.py`: SVI parameterization and arbitrage stubs.
+- `src/tsx60_iv/svi.py`: SVI parameterization, slice calibration, arbitrage checks.
 - `src/tsx60_iv/tracking.py`: MLflow logging interface.
 - `src/tsx60_iv/api.py`: FastAPI surface-serving interface.
 - `tests/`: deterministic unit and property tests.
@@ -24,3 +24,7 @@ parity must be preserved. Use finite, positive expiry and volatility; `w(k,T)`
 must be nonnegative and monotone in calendar time. Do not clamp arbitrages into
 apparent validity. Keep tests offline: the checked-in Parquet chain is the
 regression fixture and live downloads must remain explicitly requested.
+
+## Session Memory & Progress Log
+- Read `@docs/PROGRESS.md` at session start to know current project state, recent skill runs, and next steps.
+- Update `docs/PROGRESS.md` (via `/log`) before ending a session or running `/clear`.

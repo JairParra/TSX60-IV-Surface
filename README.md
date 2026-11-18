@@ -76,8 +76,8 @@ w(k;\chi)=a+b\left[\rho(k-m)+
 $$
 
 Its domain requires $b\geq0$, $|\rho|<1$, $\sigma>0$, and
-$a+b\sigma\sqrt{1-\rho^2}\geq0$. The calibration implementation is a
-documented stub; the parameterization and validation are available now.
+$a+b\sigma\sqrt{1-\rho^2}\geq0$. Per-expiry calibration (`calibrate_svi_slice`) rejects fits with butterfly
+arbitrage, and `check_calendar_arbitrage` tests monotonicity across expiries.
 
 ### Static No-Arbitrage Conditions
 

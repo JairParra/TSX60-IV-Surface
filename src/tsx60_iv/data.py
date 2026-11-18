@@ -15,7 +15,7 @@ def fetch_xiu_chain(
     ticker: str = _DEFAULT_TICKER,
     cache_path: Path | None = None,
 ) -> pd.DataFrame:
-    """Fetch, normalize, filter, and optionally cache an ETF option chain.
+    """Fetch, normalize, and optionally cache an ETF option chain.
 
     Parameters
     ----------
@@ -27,7 +27,7 @@ def fetch_xiu_chain(
     Returns
     -------
     pandas.DataFrame
-        Valid call and put quotes with calculated ``mid`` prices.
+        Raw call and put quotes (unfiltered, no ``mid``) with an ``as_of`` date.
     """
     instrument = yf.Ticker(ticker)
     frames: list[pd.DataFrame] = []
@@ -41,14 +41,8 @@ def fetch_xiu_chain(
     if not frames:
         return pd.DataFrame()
     result = pd.concat(frames, ignore_index=True)
-    result["mid"] = (result["bid"] + result["ask"]) / 2.0
-    relative_spread = (result["ask"] - result["bid"]) / result["mid"]
-    result = result.loc[
-        (result["bid"] > 0)
-        & (result["ask"] >= result["bid"])
-        & (relative_spread <= 0.35)
-        & np.isfinite(result["mid"])
-    ].reset_index(drop=True)
+    today = pd.Timestamp.now(tz="America/Toronto").normalize()
+    result["as_of"] = today.tz_localize(None)
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_parquet(cache_path, index=False)
@@ -103,8 +97,9 @@ def estimate_forward_and_rates(
         as_of = pd.Timestamp(date.today())
     clean["expiration"] = pd.to_datetime(clean["expiration"])
     clean["time_to_expiry"] = (clean["expiration"] - as_of).dt.days / 365.0
-    if np.any(clean["time_to_expiry"] <= 0):
-        raise ValueError("expirations must be after as_of")
+    clean = clean.loc[clean["time_to_expiry"] > 0].reset_index(drop=True)
+    if clean.empty:
+        raise ValueError("no expirations after as_of")
     clean["discount"] = np.exp(-r_cad * clean["time_to_expiry"])
     calls = clean.loc[clean["option_type"].str.lower() == "call"]
     puts = clean.loc[clean["option_type"].str.lower() == "put"]
@@ -118,15 +113,12 @@ def estimate_forward_and_rates(
     )
     pairs["distance"] = abs(pairs["strike"] - spot)
     if pairs.empty:
-        clean["forward"] = spot * np.exp(r_cad * clean["time_to_expiry"])
-    else:
-        ranked = pairs.sort_values(["expiration", "distance"])
-        near_atm = ranked.groupby("expiration", group_keys=False).head(3)
-        forwards = near_atm.groupby("expiration")["forward_estimate"].median()
-        clean["forward"] = clean["expiration"].map(forwards)
-        clean["forward"] = clean["forward"].fillna(
-            spot * np.exp(r_cad * clean["time_to_expiry"])
-        )
+        raise ValueError("no call/put pairs to estimate forwards")
+    ranked = pairs.sort_values(["expiration", "distance"])
+    near_atm = ranked.groupby("expiration", group_keys=False).head(3)
+    forwards = near_atm.groupby("expiration")["forward_estimate"].median()
+    clean["forward"] = clean["expiration"].map(forwards)
+    clean = clean.dropna(subset=["forward"]).reset_index(drop=True)
     clean["log_moneyness"] = np.log(clean["strike"] / clean["forward"])
     return clean
 
