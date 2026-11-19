@@ -1,0 +1,201 @@
+\paragraph{The chain.}
+{\footnotesize
+\begin{verbatim}
+from tsx60_iv.synthetic import generate_realistic_chain
+chain = generate_realistic_chain()
+print(chain.shape)
+cols = ["expiration", "option_type", "strike", "bid", "ask", "volume"]
+print(chain[cols].head(4).to_string(index=False))
+\end{verbatim}
+\vspace{-0.6em}
+\begin{verbatim}
+(780, 11)
+expiration option_type  strike  bid   ask  volume
+2025-01-17        call    28.0 9.57 10.07     0.0
+2025-01-17        call    29.0 8.61  9.05     0.0
+2025-01-17        call    30.0 7.63  8.03     0.0
+2025-01-17        call    31.0 6.53  6.88     0.0
+\end{verbatim}
+}
+
+\paragraph{One expiry, calls and puts side by side.}
+{\footnotesize
+\begin{verbatim}
+e = chain[chain.expiration == "2025-03-21"]
+window = e[e.strike.between(36, 39)]
+print(window.pivot(index="strike", columns="option_type",
+                   values=["bid", "ask"]).to_string())
+\end{verbatim}
+\vspace{-0.6em}
+\begin{verbatim}
+              bid         ask      
+option_type  call   put  call   put
+strike                             
+36.0         2.03  0.30  2.14  0.33
+36.5         1.63  0.43  1.73  0.46
+37.0         1.28  0.57  1.36  0.61
+37.5         0.95  0.75  1.01  0.80
+38.0         0.69  0.96  0.73  1.02
+38.5         0.46  1.24  0.49  1.32
+39.0         0.28  1.57  0.31  1.66
+\end{verbatim}
+}
+
+\paragraph{Quality filter, time to expiry, rate and discount.}
+{\footnotesize
+\begin{verbatim}
+from tsx60_iv.rates import RateCurve
+from tsx60_iv.synthetic import BOC_CURVE_PATH
+from tsx60_iv.data import estimate_forward_and_rates
+
+curve = RateCurve.from_json(BOC_CURVE_PATH)
+spot = float(chain.spot.iloc[0])
+clean = estimate_forward_and_rates(chain, spot, curve)
+c = clean[clean.expiration == "2025-03-21"]
+print(len(e), "quotes,", len(c), "pass the quality filter")
+cols = ["strike", "option_type", "mid", "time_to_expiry", "rate", "discount"]
+print(c[cols].head(3).to_string(index=False))
+\end{verbatim}
+\vspace{-0.6em}
+\begin{verbatim}
+60 quotes, 42 pass the quality filter
+ strike option_type   mid  time_to_expiry     rate  discount
+   28.0        call 9.840        0.213699 0.031559  0.993279
+   29.0        call 8.750        0.213699 0.031559  0.993279
+   30.0        call 7.875        0.213699 0.031559  0.993279
+\end{verbatim}
+}
+
+\paragraph{Put-call parity by hand: the forward from the three at-the-money pairs.}
+{\footnotesize
+\begin{verbatim}
+D = c.discount.iloc[0]
+pairs = c.pivot(index="strike", columns="option_type", values="mid").dropna()
+K = pairs.index.to_numpy()
+pairs["F_hat"] = K + (pairs.call - pairs.put) / D
+near = pairs.iloc[np.argsort(np.abs(K - spot))[:3]]
+print(near.round(4).to_string())
+print("median F =", round(near.F_hat.median(), 4))
+\end{verbatim}
+\vspace{-0.6em}
+\begin{verbatim}
+option_type  call    put    F_hat
+strike                           
+37.5         0.98  0.775  37.7064
+38.0         0.71  0.990  37.7181
+37.0         1.32  0.590  37.7349
+median F = 37.7181
+\end{verbatim}
+}
+
+\paragraph{Correcting the forward for early exercise (three passes).}
+{\footnotesize
+\begin{verbatim}
+from tsx60_iv.bsm import implied_volatility
+from tsx60_iv.american import early_exercise_bias
+from tsx60_iv.market_params import expected_dividends, load_params
+from tsx60_iv.synthetic import MARKET_PARAMS_PATH
+
+dividends = expected_dividends(load_params(MARKET_PARAMS_PATH))
+T, r = c.time_to_expiry.iloc[0], c.rate.iloc[0]
+Kn = near.index.to_numpy()
+F = near.F_hat.median()
+for step in range(3):
+    adjusted = {}
+    for side in ("call", "put"):
+        iv = [implied_volatility(m, F, k, T, D, side)
+              for k, m in zip(Kn, near[side])]
+        premium, _ = early_exercise_bias(np.array(iv), spot, F, Kn, T, r, side,
+                                         dividends=dividends)
+        adjusted[side] = near[side].to_numpy() - premium
+    F = np.median(Kn + (adjusted["call"] - adjusted["put"]) / D)
+    print("pass", step + 1, "F =", round(float(F), 4))
+\end{verbatim}
+\vspace{-0.6em}
+\begin{verbatim}
+pass 1 F = 37.7084
+pass 2 F = 37.7052
+pass 3 F = 37.7041
+\end{verbatim}
+}
+
+\paragraph{Out-of-the-money quotes inverted two ways.}
+{\footnotesize
+\begin{verbatim}
+from tsx60_iv.american import american_implied_vols
+otm = c[((c.option_type == "put") & (c.strike < F))
+        | ((c.option_type == "call") & (c.strike >= F))]
+q = r - np.log(F / spot) / T          # yield implied by the forward
+parts = []
+for side, g in otm.groupby("option_type"):
+    iv_a = american_implied_vols(g.mid.to_numpy(), spot, g.strike.to_numpy(),
+                                 T, r, q, side, dividends=dividends)
+    iv_e = [implied_volatility(m, F, k, T, D, side)
+            for m, k in zip(g.mid, g.strike)]
+    parts.append(g.assign(iv_european=100 * np.array(iv_e), iv_american=100 * iv_a))
+table = pd.concat(parts).sort_values("strike")
+cols = ["strike", "option_type", "mid", "iv_european", "iv_american"]
+print(table[cols].round(3).to_string(index=False))
+\end{verbatim}
+\vspace{-0.6em}
+\begin{verbatim}
+ strike option_type   mid  iv_european  iv_american
+   34.0         put 0.095       15.926       15.882
+   34.5         put 0.125       15.246       15.191
+   35.0         put 0.175       14.841       14.778
+   35.5         put 0.245       14.496       14.406
+   36.0         put 0.315       13.712       13.603
+   36.5         put 0.445       13.573       13.428
+   37.0         put 0.590       13.107       12.914
+   37.5         put 0.775       12.670       12.405
+   38.0        call 0.710       12.244       11.931
+   38.5        call 0.475       11.602       11.400
+   39.0        call 0.295       11.024       10.903
+   39.5        call 0.165       10.442       10.377
+\end{verbatim}
+}
+
+\paragraph{Fitting one SVI slice and checking the butterfly condition.}
+{\footnotesize
+\begin{verbatim}
+from tsx60_iv.svi import calibrate_svi_slice, durrleman_g
+k = np.log(table.strike.to_numpy() / F)
+w = (table.iv_american.to_numpy() / 100) ** 2 * T      # total variance
+params = calibrate_svi_slice(k, w)
+names = ["a", "b", "rho", "m", "sigma"]
+print({n: round(float(v), 5) for n, v in zip(names, params)})
+grid = np.linspace(k.min() - 0.1, k.max() + 0.1, 200)
+print("min g on the grid:", round(float(durrleman_g(grid, *params).min()), 3))
+\end{verbatim}
+\vspace{-0.6em}
+\begin{verbatim}
+{'a': -0.00224, 'b': 0.015, 'rho': -0.71255, 'm': 0.14469, 'sigma': 0.21238}
+min g on the grid: 0.457
+\end{verbatim}
+}
+
+\paragraph{The whole pipeline, then the European variant for comparison.}
+{\footnotesize
+\begin{verbatim}
+from tsx60_iv.surface import build_surface
+kw = dict(ticker="XIU (synthetic)", source="synthetic_demo", synthetic=True)
+amer = build_surface(chain, spot, curve, exercise="american",
+                     dividends=dividends, **kw)
+euro = build_surface(chain, spot, curve, exercise="european", **kw)
+print("fitted:", len(amer["expiries"]), " rejected:",
+      [r["expiration"] for r in amer["rejected"]])
+print("calendar arbitrage-free:", amer["calendar"]["ok"])
+for a, b in list(zip(amer["expiries"], euro["expiries"]))[2:5]:
+    atm = lambda s: 100 * (s["atm_w"] / s["T"]) ** 0.5
+    print(a["expiration"], "ATM vol  american %.2f  european %.2f"
+          % (atm(a), atm(b)))
+\end{verbatim}
+\vspace{-0.6em}
+\begin{verbatim}
+fitted: 12  rejected: ['2025-01-17']
+calendar arbitrage-free: True
+2025-04-17 ATM vol  american 12.20  european 12.37
+2025-05-16 ATM vol  american 12.42  european 12.62
+2025-06-20 ATM vol  american 12.60  european 12.85
+\end{verbatim}
+}

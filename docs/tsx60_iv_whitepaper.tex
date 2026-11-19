@@ -3,467 +3,998 @@
 \usepackage{amsmath,amssymb}
 \usepackage{tcolorbox}
 \usepackage{array}
+\usepackage{tikz}
+
+% numbers computed by docs/build_walkthrough.py (kept in sync with the code)
+\input{generated/numbers.tex}
+\input{generated/filter_counts.tex}
 
 \newcommand{\Norm}{\Phi}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Q}{\mathbb{Q}}
 \DeclareMathOperator{\median}{median}
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 
-\title{TSX60 IV Surface: Methods as Implemented}
+\newtcolorbox[auto counter]{defn}[1]{colback=blue!4,colframe=blue!50!black,
+  fonttitle=\bfseries,title={Definition~\thetcbcounter: #1}}
+\newtcolorbox[auto counter]{fact}[1]{colback=green!4,colframe=green!40!black,
+  fonttitle=\bfseries,title={Result~\thetcbcounter: #1}}
+\newtcolorbox{keyidea}{colback=yellow!8,colframe=orange!60!black,
+  fonttitle=\bfseries,title={The idea in one paragraph}}
+\newtcolorbox{algobox}[1]{colback=gray!4,colframe=black!60,fonttitle=\bfseries,
+  title={#1}}
+
+\title{Implied Volatility Surfaces for American-Style ETF Options\\[2pt]
+\large Theory, algorithm and a worked example on XIU (S\&P/TSX~60)}
 \author{}
 \date{}
 
 \begin{document}
 \maketitle
 
-\section{System status and provenance}
+\begin{abstract}
+\noindent This document explains, from first principles, how a market of option
+quotes is turned into a validated implied-volatility surface, and what the
+accompanying code (\texttt{tsx60-iv-surface}) actually does. Part~I is a
+self-contained introduction: options, no-arbitrage pricing, forwards, rates and
+dividends, European versus American exercise, the binomial tree, implied
+volatility and the parametrization of the smile. Part~II states the algorithm in
+pseudo-code and discusses its variants and numerical safeguards. Part~III walks
+through one expiry with real tables and a Python session, then reports how well
+the pipeline recovers a known surface. The reader is assumed to know
+probability and basic stochastic calculus (It\^o's formula, change of measure);
+no prior options knowledge is needed. All quotes in this project are
+\emph{synthetic}.
+\end{abstract}
 
-\begin{itemize}
-  \item \textbf{Implemented:} \texttt{data.py} (quote filtering, forwards),
-        \texttt{bsm.py} (pricing, Greeks, implied volatility),
-        \texttt{svi.py} (Raw SVI, calibration, arbitrage checks),
-        \texttt{american.py} (binomial pricer, tree inversion, early-exercise
-        bias), \texttt{rates.py} (Bank of Canada curve),
-        \texttt{market\_params.py} (free Yahoo-derived anchors),
-        \texttt{surface.py} (the pipeline below, writing \texttt{surface.json})
-        and \texttt{api.py} (serves that file and an interactive 3D page).
-        Each has offline tests.
-  \item \textbf{Optional:} \texttt{tracking.py} (an MLflow logging call) runs
-        only with the \texttt{--mlflow} flag and is not covered by tests.
-  \item \textbf{Data:} Yahoo Finance returns no options for \texttt{XIU.TO}, so
-        there is no live XIU source yet and none is planned. Every result here
-        comes from a \emph{synthetic} chain (\texttt{synthetic.py}; its small
-        legacy form is the offline test fixture
-        \texttt{tests/fixtures/\allowbreak xiu\_\allowbreak sample\_\allowbreak chain.parquet}).
-        It contains no market quotes, though its inputs are real: the Bank of
-        Canada curve of 2025-01-02 and XIU.TO's closing spot, realized
-        volatility and dividends (Section~\ref{sec:synthetic}). The page labels
-        the surface a synthetic demo. A live download for a Yahoo-listed ticker
-        happens only with an explicit \texttt{--fetch}, at one request per
-        expiry.
-  \item \textbf{Companion documents:} \texttt{README.md} (quick start and a
-        shorter statement of the mathematics), \texttt{docs/README.md}
-        (architecture and function reference) and \texttt{docs/PROGRESS.md}
-        (development log).
-\end{itemize}
+\tableofcontents
+\newpage
 
-\section{Running the project}\label{sec:running}
+% =====================================================================
+\part{Foundations}
+% =====================================================================
 
-Commands are run from the repository root with \texttt{uv}.
+\section{Introduction and scope}\label{sec:intro}
 
-\begin{center}\small
-\begin{tabular}{|L{4.1cm}|L{10.6cm}|}
-\hline
-Task & Command \\ \hline
-Install & \texttt{uv sync} \\ \hline
-Build the surface & \texttt{uv run python -m tsx60\_iv.surface --demo} \\ \hline
-Serve the page & \texttt{uv run uvicorn tsx60\_iv.api:app --port 8000}, then open
-\texttt{http://127.0.0.1:8000/} \\ \hline
-Rerun the simulation & the build command again; the page re-checks the file every
-30\,s, so no restart is needed \\ \hline
-Tests and lint & \texttt{uv run pytest} and \texttt{uv run ruff check .} \\ \hline
-Rebuild this PDF & \texttt{tectonic docs/tsx60\_iv\_whitepaper.tex} \\ \hline
-Refresh the rate curve & \texttt{uv run python -m tsx60\_iv.rates --as-of DATE
---out PATH} (one Valet request) \\ \hline
-Refresh the market anchors & \texttt{uv run python -m tsx60\_iv.market\_params
---as-of DATE --out PATH} (one Yahoo request) \\ \hline
-\end{tabular}
-\end{center}
+An \emph{option} gives its holder the right, not the obligation, to buy or sell
+an asset at a fixed price. Options are traded with a menu of strikes and expiry
+dates, and the quoted prices embed the market's view of future volatility. The
+\emph{implied volatility surface}, the map from (strike, expiry) to the
+volatility that reproduces the quoted price in a reference model, is the
+standard way to summarize that menu. Desks use it to mark books, price exotics
+consistently with vanillas, and hedge.
 
-The surface builder takes the following flags.
+\paragraph{What this project builds.} For the iShares S\&P/TSX~60 ETF (ticker
+\texttt{XIU}) the code takes a table of bid and ask quotes and produces
 
-\begin{center}\small
-\begin{tabular}{|L{4.1cm}|L{3.2cm}|L{7.2cm}|}
-\hline
-Flag & Default & Meaning \\ \hline
-\texttt{--demo} & off & generated chain and bundled Bank of Canada snapshot \\ \hline
-\texttt{--exercise} & \texttt{american} & \texttt{european} or \texttt{american}
-(Section~\ref{sec:choice}) \\ \hline
-\texttt{--dividends} & \texttt{schedule} with \texttt{--demo}, else
-\texttt{continuous} & dividend model of the tree; \texttt{schedule} needs
-\texttt{--demo} \\ \hline
-\texttt{--curve}, \texttt{--rate} & bundled curve in the demo, else 3.75\% &
-curve snapshot or flat rate (not both) \\ \hline
-\texttt{--min-mid} & 0.05 & drop quotes with a smaller mid (five ticks) \\ \hline
-\texttt{--out} & \texttt{data/surface.json} & output file, written atomically \\ \hline
-\texttt{--fetch}, \texttt{--force} & off & explicit live download; 30-minute
-cooldown unless forced \\ \hline
-\end{tabular}
-\end{center}
-
-\section{Algorithm}
-
-\begin{tcolorbox}[title=Pipeline from quotes to a validated slice]
 \begin{enumerate}
-  \item Filter quotes: keep $b>0$, $a\ge b$, mid $m=(a+b)/2$ finite and
-        $(a-b)/m\le 0.35$.
-  \item Set $T=\mathrm{days}(t_{\mathrm{exp}}-t_0)/365$ and $D(T)=e^{-r(T)T}$
-        with $r(T)$ from the Bank of Canada curve (Section~\ref{sec:rates});
-        drop expiries with $T\le 0$.
-  \item Estimate $F(T)$ by put-call parity (Section~\ref{sec:forward}); drop
-        expiries with no call/put pair.
-  \item Compute $k=\ln(K/F(T))$; keep out-of-the-money quotes (puts for
-        $K<F$, calls for $K\ge F$) with mid $\ge 0.05$.
-  \item Invert each mid to $\sigma$, one row at a time, with the American
-        tree (default) or forward BSM and Brent's method
-        (Sections~\ref{sec:iv} and~\ref{sec:american}); count and skip rows
-        that fail; set $w=\sigma^2T$.
-  \item Fit Raw SVI per expiry (at least 5 points) by constrained multi-start
-        SLSQP (Section~\ref{sec:svi}); list the expiry as rejected if the fit
-        fails or has butterfly arbitrage.
-  \item Check $\partial_T w(k,T)\ge 0$ across adjacent expiries.
+  \item a risk-free curve and a forward price for every expiry,
+  \item an implied volatility for every usable quote, accounting for the fact
+        that \texttt{XIU} options are \emph{American-style},
+  \item a smooth, arbitrage-checked fit of each expiry's smile (SVI),
+  \item a JSON surface, served by a small API and drawn as an interactive 3D page.
 \end{enumerate}
-\end{tcolorbox}
 
-Which module does what:
+\paragraph{What it does not use: real quotes.} Yahoo Finance carries no
+\texttt{XIU} options and licensed Montr\'eal Exchange data is paid. Every surface
+here is therefore \emph{generated} from an arbitrage-free model and real
+\emph{inputs} (the Bank of Canada curve of 2025-01-02, and \texttt{XIU.TO}'s
+closing spot, realized volatility and dividends). Generating the market also
+gives the pipeline something real research code rarely has: a known answer to
+compare with. The aim is rigour in the machinery, not a market view.
+
+\paragraph{Roadmap.} Part~I (Sections~\ref{sec:options}--\ref{sec:smile}) builds
+the theory. Part~II (Sections~\ref{sec:arch}--\ref{sec:numerics}) is the
+algorithm. Part~III (Sections~\ref{sec:synthetic}--\ref{sec:results}) is the
+worked example. Part~IV collects limitations and references. Readers who want
+only the practical side can start at Section~\ref{sec:walkthrough}.
+
+% ---------------------------------------------------------------------
+\section{Options and their quotes}\label{sec:options}
+
+\subsection{Contracts and payoffs}
+
+\begin{defn}{European and American options}
+A \emph{European call} (put) with strike $K$ and expiry $T$ pays
+$(S_T-K)^+$ ($(K-S_T)^+$) at time $T$, where $S_T$ is the underlying price. An
+\emph{American} option can instead be exercised at any time $t\le T$, paying
+$(S_t-K)^+$ or $(K-S_t)^+$ at that moment.
+\end{defn}
+
+An option is \emph{in the money} (ITM) if exercising now would pay something
+($S>K$ for a call, $S<K$ for a put), \emph{at the money} (ATM) if $S\approx K$,
+and \emph{out of the money} (OTM) otherwise. Because moneyness is naturally
+multiplicative we use the \emph{log-moneyness} $k=\ln(K/F)$ relative to the
+forward $F$ (Section~\ref{sec:forward}).
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[scale=0.85,font=\small]
+  \begin{scope}
+    \draw[->] (0,0) -- (5.2,0) node[right] {$S_T$};
+    \draw[->] (0,0) -- (0,3.4);
+    \draw[thick,blue] (0,0) -- (2.2,0) -- (4.9,2.7);
+    \draw[dashed,gray] (2.2,0) -- (2.2,-0.15) node[below] {$K$};
+    \node at (2.6,3.1) {call: $(S_T-K)^+$};
+  \end{scope}
+  \begin{scope}[xshift=7cm]
+    \draw[->] (0,0) -- (5.2,0) node[right] {$S_T$};
+    \draw[->] (0,0) -- (0,3.4);
+    \draw[thick,red] (0,2.7) -- (2.7,0) -- (4.9,0);
+    \draw[dashed,gray] (2.7,0) -- (2.7,-0.15) node[below] {$K$};
+    \node at (2.6,3.1) {put: $(K-S_T)^+$};
+  \end{scope}
+\end{tikzpicture}
+\caption{Payoffs at expiry. Before expiry an option is worth more than this
+(it still has \emph{time value}); the surface is about pricing that excess.}
+\end{figure}
+
+\subsection{The underlying: an ETF that pays dividends}
+
+\texttt{XIU} holds the 60 largest Canadian stocks and distributes their
+dividends, roughly quarterly. Its options are listed on the Montr\'eal Exchange,
+expire on the third Friday of the month, and are American-style. Two facts about
+the underlying matter for everything that follows: it has a
+\emph{spot} price $S$, and it pays \emph{cash dividends} that lower $S$ on the
+ex-dividend date. The latter changes both the forward price and the value of
+early exercise.
+
+\subsection{What a quote looks like}\label{sec:quotes}
+
+A market maker posts a \emph{bid} (the price at which they buy) and an
+\emph{ask} (the price at which they sell). We work with the \emph{mid}
+$m=(b+a)/2$, the \emph{spread} $a-b$ and the \emph{relative spread} $(a-b)/m$.
+Prices move in \emph{ticks} (here 0.01 CAD). A chain is a table with one row
+per contract:
 
 \begin{center}\small
-\begin{tabular}{|L{3.3cm}|L{11.4cm}|}
+\begin{tabular}{|l|L{9.6cm}|}
 \hline
-Module & Role \\ \hline
-\texttt{data.py} & quote filter, per-expiry rate, parity forward (with an optional
-mid adjustment) \\ \hline
-\texttt{rates.py} & Bank of Canada curve, bootstrap, JSON snapshots \\ \hline
-\texttt{bsm.py} & forward BSM price, Greeks, Brent inversion (European) \\ \hline
-\texttt{american.py} & CRR tree, discrete dividends, Newton inversion,
-early-exercise premium \\ \hline
-\texttt{svi.py} & raw SVI, constrained fit, butterfly and calendar checks \\ \hline
-\texttt{surface.py} & the pipeline, mesh, JSON writer and command line \\ \hline
-\texttt{synthetic.py} & legacy test chain and the realistic SSVI demo chain \\ \hline
-\texttt{api.py}, \texttt{static/} & the file-backed API and the 3D page \\ \hline
+column & meaning \\ \hline
+\texttt{expiration}, \texttt{option\_type}, \texttt{strike} & the contract \\ \hline
+\texttt{bid}, \texttt{ask} & best prices in CAD per share \\ \hline
+\texttt{volume}, \texttt{openInterest} & contracts traded today / outstanding \\ \hline
+\texttt{as\_of}, \texttt{spot} & valuation date and underlying price \\ \hline
 \end{tabular}
 \end{center}
 
-\texttt{surface.py} runs these steps and reports, but never repairs, skipped
-quotes, rejected expiries and a failed calendar check. The 3D mesh shows the
-fitted expiries plus six rows between each pair, where total variance is
-linear in $T$ at fixed $k$ (this preserves calendar monotonicity). Cells
-outside the quoted strikes of the neighbouring expiries are left empty, not
-extrapolated.
+Not every quote is usable. A zero bid means the market maker will not buy at any
+price, a very wide relative spread carries little information, and prices at the
+one-tick floor reflect the tick size, not volatility. The code keeps a quote only
+if $b>0$, $a\ge b$, the mid is finite and $(a-b)/m\le 0.35$; it later also drops
+mids below $0.05$ (five ticks). Section~\ref{sec:walkthrough} shows which quotes
+these rules remove.
 
-\section{Risk-free curve}\label{sec:rates}
+\subsection{Why we invert only out-of-the-money quotes}
 
-\texttt{rates.py} reads one Bank of Canada Valet snapshot (open data) with
-six nodes: CORRA overnight, the 1, 3, 6 and 12 month Treasury bills and the
-2 year benchmark bond. A quoted yield $y$ becomes a continuously compounded
-zero rate by
-\begin{equation}
-  r=\frac{\ln(1+y\tau)}{\tau}\qquad(\text{money-market simple yield}),
+For a given strike the market quotes both a call and a put. They are tied by
+put-call parity (Section~\ref{sec:parity}), so they carry the same volatility
+information. The \emph{out-of-the-money} one (put below the forward, call above)
+is the better instrument to read it from: its price is entirely time value, it
+is most sensitive to volatility (largest vega per unit of price), and its
+early-exercise premium is smallest. The ITM option is mostly intrinsic value
+plus the same time value, and for American options it also carries a larger
+early-exercise premium.
+
+% ---------------------------------------------------------------------
+\section{Pricing by no-arbitrage}\label{sec:pricing}
+
+\subsection{The model}
+
+Fix a probability space with a Brownian motion $W$ under the risk-neutral
+measure $\Q$. The ETF price follows geometric Brownian motion with constant
+volatility $\sigma$, risk-free rate $r$ and continuous dividend yield $q$:
+\begin{equation}\label{eq:gbm}
+  dS_t=(r-q)\,S_t\,dt+\sigma S_t\,dW_t .
 \end{equation}
-with $\tau$ the tenor in years. The 2 year benchmark is a semi-annual par yield
-$c$, so its zero rate $r_2$ is bootstrapped: it solves
-$\sum_{t=0.5,1,1.5}\tfrac c2e^{-r(t)t}+(1+\tfrac c2)e^{-2r_2}=1$, where $r(t)$
-for $t\le 1$ comes from the shorter nodes and $r(1.5)$ is linear between $r(1)$
-and $r_2$. On 2025-01-02 the bootstrapped zero is 2.907\% against 2.909\% if the
-par yield is used directly, so the shortcut was worth about 0.15 basis points
-there. Each node uses the last print on or before the
-valuation date; a missing or older-than-10-day print raises an error. $r(T)$ is
-linear in the tenor between nodes and flat beyond the end nodes. The checked-in
-snapshot is the curve of 2025-01-02 (2.91--3.30\%, downward sloping) and also
-stores the raw quoted yields for audit; tests never call the Valet API.
-
-\section{Forward estimation}\label{sec:forward}
-
-Put-call parity for European options is $C-P=D(T)\,(F(T)-K)$. For each strike
-$K_i$ with both a call and a put at the same expiry,
+By It\^o's formula $d\ln S_t=(r-q-\tfrac12\sigma^2)\,dt+\sigma\,dW_t$, so
 \begin{equation}
-  \hat F_i = K_i + e^{rT}\,(C_i-P_i),
+  S_T=S_0\,e^{(r-q)T}\,\exp\!\bigl(-\tfrac12\sigma^2T+\sigma\sqrt T\,Z\bigr),
+  \qquad Z\sim N(0,1).
 \end{equation}
-using mid prices. For each expiry take the three pairs with smallest
-$|K_i-S|$, where $S$ is spot, and set
-\begin{equation}
-  F(T)=\median\{\hat F_i : i\in\text{3 nearest-ATM pairs}\}.
-\end{equation}
-Spot only selects the strikes. There is no spot-based fallback: an expiry
-without a pair is dropped, and a chain with no pairs raises an error.
+The \emph{drift under $\Q$ is $r-q$} because holding the asset earns $q$ in
+dividends and, under $\Q$, every tradable total-return asset grows at $r$.
 
-\section{Forward-space pricing and Greeks}
+\begin{keyidea}
+In a complete, arbitrage-free market the price of a payoff $H$ at $T$ is its
+discounted risk-neutral expectation, $V_0=e^{-rT}\E^\Q[H]$. Everything below is
+this one formula evaluated for different payoffs and models.
+\end{keyidea}
 
-With $\sqrt v=\sigma\sqrt T$,
-\begin{equation}
-  d_1=\frac{\ln(F/K)}{\sqrt v}+\tfrac12\sqrt v,\qquad d_2=d_1-\sqrt v,
+\subsection{The Black--Scholes formula in forward form}\label{sec:bsm}
+
+Define the \emph{forward price} $F=\E^\Q[S_T]=S_0e^{(r-q)T}$ and the discount
+factor $D=e^{-rT}$. Then $S_T=F\,e^{-\frac12\sigma^2T+\sigma\sqrt TZ}$ depends on
+the rate and the dividends \emph{only through $F$}.
+
+\begin{fact}{Black's formula}
+For a European call,
+\begin{equation}\label{eq:bsm}
+  C=D\,\bigl[F\,\Norm(d_1)-K\,\Norm(d_2)\bigr],\qquad
+  d_{1,2}=\frac{\ln(F/K)\pm\tfrac12\sigma^2T}{\sigma\sqrt T},
 \end{equation}
-\begin{equation}
-  C=D\,[F\,\Norm(d_1)-K\,\Norm(d_2)],\qquad
-  P=D\,[K\,\Norm(-d_2)-F\,\Norm(-d_1)].
-\end{equation}
-Let $\varphi$ be the standard normal density. All derivatives are with respect
-to the forward $F$ (not spot) and include $D(T)=e^{-rT}$:
+and for a put $P=D\,[K\,\Norm(-d_2)-F\,\Norm(-d_1)]$.
+\end{fact}
+
+\noindent\emph{Derivation.} Write $C=D\,\E^\Q[(S_T-K)^+]=D\bigl(\E[S_T\mathbf 1_{S_T>K}]-K\,\Q(S_T>K)\bigr)$.
+Now $S_T>K$ exactly when $Z>-d_2$, so $\Q(S_T>K)=\Norm(d_2)$. For the first term,
+\[
+  \E[S_T\mathbf 1_{S_T>K}]=F\int_{-d_2}^{\infty}e^{\sigma\sqrt T z-\frac12\sigma^2T}\,\varphi(z)\,dz
+  =F\int_{-d_2}^{\infty}\varphi\bigl(z-\sigma\sqrt T\bigr)\,dz=F\,\Norm(d_2+\sigma\sqrt T)=F\,\Norm(d_1),
+\]
+where $\varphi$ is the standard normal density; completing the square gives the
+shifted density (this is Girsanov's theorem with the asset as numeraire). \hfill$\square$
+
+Working with $(F,D)$ rather than $(S,r,q)$ is the key simplification: a single
+formula covers dividends and rates, and (Section~\ref{sec:forward}) the forward
+can be read straight from the option market without knowing $q$ at all.
+
+\subsection{Greeks and why volatility can be inverted}
+
+The sensitivities used in the code are taken with respect to $F$ and include $D$.
+With $\varphi$ the normal density,
 \begin{align}
-  \Delta_C&=D\,\Norm(d_1), & \Delta_P&=D\,[\Norm(d_1)-1],\\
-  \Gamma&=\frac{D\,\varphi(d_1)}{F\sigma\sqrt T}, &
+  \Delta_C&=D\,\Norm(d_1), & \Gamma&=\frac{D\,\varphi(d_1)}{F\sigma\sqrt T}, &
   \mathcal V&=\frac{\partial C}{\partial\sigma}=D\,F\,\varphi(d_1)\sqrt T,\\
-  \text{vanna}&=\frac{\partial\Delta}{\partial\sigma}=-\frac{D\,\varphi(d_1)\,d_2}{\sigma}, &
-  \text{volga}&=\frac{\partial\mathcal V}{\partial\sigma}=\frac{\mathcal V\,d_1d_2}{\sigma}.
+  \text{vanna}&=\frac{\partial\Delta}{\partial\sigma}=-\frac{D\varphi(d_1)\,d_2}{\sigma}, &
+  \text{volga}&=\frac{\partial\mathcal V}{\partial\sigma}=\frac{\mathcal V\,d_1d_2}{\sigma}.&&
 \end{align}
-Vega is per unit volatility ($\Delta\sigma=1.0$). A one-point move in
-volatility ($\Delta\sigma=0.01$) changes the price by $0.01\,\mathcal V$, so the
-reported vega is $100\times$ the per-point figure. Volga is likewise per unit
-volatility. At $\sigma=0$ the price is the discounted intrinsic value, and the
-Greeks raise an error.
+\emph{Vega} $\mathcal V$ is per unit volatility; a one-point move
+($\Delta\sigma=0.01$) changes the price by $0.01\,\mathcal V$. Since
+$\mathcal V>0$, the price is strictly increasing in $\sigma$, which is what makes
+implied volatility well defined (Section~\ref{sec:iv}).
 
-\section{Implied volatility}\label{sec:iv}
+\subsection{Put-call parity and price bounds}\label{sec:parity}
 
-A price is accepted only if it is strictly inside the static bounds
+Buy a call and sell a put with the same strike and expiry. At $T$ the payoff is
+$(S_T-K)^+-(K-S_T)^+=S_T-K$, the payoff of a forward contract struck at $K$. By
+no-arbitrage the two portfolios cost the same today:
+\begin{equation}\label{eq:parity}
+  C-P=D\,(F-K)\qquad(\text{European}).
+\end{equation}
+Parity also gives static bounds, which every admissible price must satisfy:
 \begin{equation}
   D\max(F-K,0)<C<DF,\qquad D\max(K-F,0)<P<DK.
 \end{equation}
-Otherwise \texttt{implied\_volatility} raises \texttt{ValueError}; there is no
-heuristic fallback. The root of $\mathrm{BSM}(\sigma)-m=0$ is found with
-\texttt{scipy.optimize.brentq} on $[10^{-5},5]$ using its default tolerances.
-The price is strictly increasing in $\sigma$, so the root is unique when it
-exists. If the bracket does not contain a sign change the call also raises
-\texttt{ValueError}.
+A quote outside these bounds is an arbitrage or a data error; the code rejects
+it rather than clipping it.
 
-\section{American exercise}\label{sec:american}
+% ---------------------------------------------------------------------
+\section{Rates, forwards and dividends}\label{sec:forward}
 
-\texttt{XIU} options are American-style. \texttt{american.py} prices them with a
-Cox-Ross-Rubinstein tree: with $\Delta t=T/n$, $u=e^{\sigma\sqrt{\Delta t}}$,
-$d=1/u$ and $p=\bigl(e^{(r-q)\Delta t}-d\bigr)/(u-d)$,
+\subsection{Discounting and the zero curve}
+
+A cash flow at $T$ is discounted by $D(T)=e^{-r(T)\,T}$, where $r(T)$ is the
+continuously compounded \emph{zero rate} for maturity $T$. Using the rate of the
+option's own maturity, not one flat number, matters when the curve is sloped.
+The Bank of Canada publishes (Valet API, open data) six benchmark prints that the
+code turns into $r(T)$:
+
+\begin{center}
+\input{generated/curve_table.tex}
+\end{center}
+
+\paragraph{Conversion.} A money-market yield $y$ over tenor $\tau$ is a simple
+rate: one dollar grows to $1+y\tau$. The equivalent continuous rate satisfies
+$e^{r\tau}=1+y\tau$, i.e.
 \begin{equation}
-  V_{i,j}=\max\!\Bigl(\text{payoff}_{i,j},\ e^{-r\Delta t}\bigl[pV_{i+1,j+1}+(1-p)V_{i+1,j}\bigr]\Bigr).
+  r=\frac{\ln(1+y\tau)}{\tau}.
 \end{equation}
-The reported value averages the trees with $n$ and $n+1$ steps, which damps the
-odd-even oscillation of CRR. The continuous yield is the one implied by the
-parity forward, $q=r-\ln(F/S)/T$, so the tree's forward equals $F$ exactly.
 
-\paragraph{Discrete dividends.} With a dividend schedule the tree instead runs
-on the dividend-free price $S^*=Se^{-qT}$, and early exercise at a node of time
-$t$ is valued on $S^*+\mathrm{PV}_t$, where $\mathrm{PV}_t$ is the value of the
+\paragraph{Bootstrapping the 2-year node.} The 2-year benchmark is a
+\emph{par yield} $c$: a bond paying coupons $c/2$ every half year at par.
+Pricing it at par gives one equation for the unknown 2-year zero rate $r_2$,
+\begin{equation}
+  \sum_{t\in\{0.5,\,1,\,1.5\}}\frac c2\,e^{-r(t)\,t}+\Bigl(1+\frac c2\Bigr)e^{-2r_2}=1,
+\end{equation}
+where $r(0.5),r(1)$ come from the shorter nodes and $r(1.5)$ is linear between
+$r(1)$ and $r_2$. The result (2.907\% against 2.909\% if the par yield were used
+directly) shows the shortcut would have been harmless here, but the code does
+the bootstrap. Between nodes $r(T)$ is linear in the tenor and beyond the
+last node it is flat.
+
+\subsection{Forward price, dividends and the cost of carry}
+
+Holding the asset until $T$ costs interest on the price and forgoes nothing but
+earns dividends, so the no-arbitrage forward is
+\begin{equation}\label{eq:forward}
+  F=S\,e^{(r-q)T}\quad(\text{continuous yield}),\qquad
+  F=\bigl(S-\mathrm{PV}(\text{dividends before }T)\bigr)e^{rT}\quad(\text{discrete}),
+\end{equation}
+where $\mathrm{PV}(\cdot)=\sum_i d_i e^{-r t_i}$ discounts each cash dividend
+$d_i$ paid at $t_i$. The discrete form is the \emph{escrowed dividend} model: the
+dividends already declared are set aside, and only the remainder $S-\mathrm{PV}$
+is risky. For a given $F$, the two forms are linked by the \emph{implied yield}
+\begin{equation}
+  q=r-\frac{\ln(F/S)}{T}.
+\end{equation}
+
+\subsection{Reading the forward from the option market}
+
+Rearranging parity~\eqref{eq:parity} for a strike with both a call and a put gives
+a forward estimate that uses no model at all:
+\begin{equation}\label{eq:fhat}
+  \hat F_i=K_i+\frac{C_i-P_i}{D(T)}.
+\end{equation}
+The code takes the three strikes closest to the spot and uses the \emph{median}
+of their $\hat F_i$, which is robust to one noisy pair. There is no fallback to
+$Se^{rT}$: ignoring dividends there would silently bias every vol, so an expiry
+without a call/put pair is dropped. (For American options \eqref{eq:parity} is
+only a bound, which is why the code corrects it; see
+Section~\ref{sec:am-parity}.)
+
+% ---------------------------------------------------------------------
+\section{American options}\label{sec:american}
+
+\subsection{Early exercise as optimal stopping}
+
+An American option is worth
+\begin{equation}
+  V_0=\sup_{\tau\le T}\E^\Q\bigl[e^{-r\tau}\,\mathrm{payoff}(S_\tau)\bigr],
+\end{equation}
+the best discounted expected payoff over all stopping times, so it is at least a
+European option and at least its intrinsic value:
+$V_A\ge V_E$ and $V_A\ge\mathrm{payoff}(S_0)$. The difference
+$\mathrm{premium}=V_A-V_E\ge0$ is the \emph{early-exercise premium}. There is no
+closed form in general; the value is found numerically.
+
+\subsection{When is exercising early worth it?}
+
+\begin{fact}{No early exercise of a call without dividends}
+If $q=0$ and $r\ge0$, an American call is never exercised before $T$, so
+$C_A=C_E$.
+\end{fact}
+
+\noindent\emph{Why.} A European call satisfies $C_E\ge S-KD>S-K$ for $r>0$:
+holding is always worth more than exercising, because exercising forfeits both
+the interest on $K$ and the optionality. \hfill$\square$
+
+Two things break this. For a \emph{put}, a deep in-the-money option can be worth
+exercising to earn interest on the strike. For a \emph{call}, an imminent
+dividend lowers the price on the ex-date, so it can pay to exercise just
+\emph{before} it. Figure~\ref{fig:premium} shows both effects.
+
+\begin{figure}[ht]
+\centering
+\input{generated/fig_premium.tex}
+\caption{Early-exercise premium by strike ($S=37.70$, $T=0.31$, $\sigma=14\%$,
+$r=3\%$; a 0.60 CAD dividend 0.30 years out). Puts gain value as they go deep in
+the money. A call has a negligible premium if the dividend is smoothed into a
+yield, but a visible one if it is a discrete payment just before expiry.}
+\label{fig:premium}
+\end{figure}
+
+\subsection{Put-call parity is only a bound}\label{sec:am-parity}
+
+For American options, with $\Delta=\mathrm{PV}(\text{dividends})$,
+\begin{equation}
+  S-\Delta-K\ \le\ C_A-P_A\ \le\ S-KD.
+\end{equation}
+The European value $D(F-K)$ lies inside this interval but the American difference
+need not equal it. Using \eqref{eq:fhat} on American mids therefore biases the
+forward whenever the call or the put carries early-exercise value, most of all
+for an expiry that coincides with an ex-dividend date. The correction in
+Section~\ref{sec:fcorr} removes that bias.
+
+\subsection{The binomial tree (Cox--Ross--Rubinstein)}\label{sec:crr}
+
+Divide $[0,T]$ into $n$ steps of length $\Delta t$. In each step the price moves
+to $uS$ or $dS$ with $u=e^{\sigma\sqrt{\Delta t}}$ and $d=1/u$. Choosing the
+risk-neutral up-probability $p$ so that the one-step mean matches the continuous
+model, $p\,u+(1-p)\,d=e^{(r-q)\Delta t}$, gives
+\begin{equation}
+  p=\frac{e^{(r-q)\Delta t}-d}{u-d}.
+\end{equation}
+The one-step variance then tends to $\sigma^2\Delta t$, so by the central limit
+theorem the terminal price converges to the lognormal law of
+Section~\ref{sec:bsm}. Option values follow by backward induction from the
+terminal payoff, with the right to exercise early added at every node:
+\begin{equation}\label{eq:tree}
+  V_{i,j}=\max\!\Bigl(\mathrm{payoff}(S_{i,j}),\ e^{-r\Delta t}\bigl[p\,V_{i+1,j+1}+(1-p)\,V_{i+1,j}\bigr]\Bigr).
+\end{equation}
+For a European option drop the $\max$. The tree needs $p\in(0,1)$, i.e.
+$\sigma\sqrt{\Delta t}>|r-q|\Delta t$, which constrains the lowest volatility it
+can represent. Trees oscillate with the parity of $n$, so the code averages the
+values from $n$ and $n+1$ steps.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[x=2.3cm,y=0.85cm,font=\small]
+  \foreach \i in {0,...,3}{
+    \foreach \j in {0,...,\i}{
+      \pgfmathtruncatemacro{\a}{\i-\j}
+      \node[circle,draw,inner sep=1.6pt] (n\i\j) at (\i,{\i-2*\j}) {};
+      \node[right=2pt] at (n\i\j) {$Su^{\a}d^{\j}$};
+    }
+  }
+  \foreach \i in {0,...,2}{
+    \foreach \j in {0,...,\i}{
+      \pgfmathtruncatemacro{\ii}{\i+1}
+      \pgfmathtruncatemacro{\jj}{\j+1}
+      \draw (n\i\j) -- (n\ii\j);
+      \draw (n\i\j) -- (n\ii\jj);
+    }
+  }
+  \node[above] at (0,0.6) {$t=0$};
+  \node[above] at (3,3.6) {$t=T$};
+\end{tikzpicture}
+\caption{A three-step recombining tree. At every node the holder compares the
+payoff from exercising now with the discounted expected value of continuing,
+equation~\eqref{eq:tree}.}
+\end{figure}
+
+\subsection{Discrete dividends in the tree}
+
+Two ways to realise dividends, with the same forward.
+
+\paragraph{Continuous yield.} Run the tree on $S$ with drift $r-q$, where $q$ is
+the yield implied by the forward. This needs no schedule, but spreads the
+dividend over the whole life.
+
+\paragraph{Escrowed discrete dividends.} Run the tree on the dividend-free
+price $S^*=Se^{-qT}$ (drift $r$) and value early exercise at time $t$ on
+$S^*_t+\mathrm{PV}_t$, where $\mathrm{PV}_t$ is the value at $t$ of the
 dividends still to be paid before expiry. The schedule only times the
-dividends: $\mathrm{PV}_0$ is rescaled to $S-S^*$, so the forward is unchanged
-(a schedule more than twice off the forward is ignored in favour of the
-continuous yield). A call is then worth most just before an ex-date, which a
-continuous yield spreads over the whole life.
+dividends: $\mathrm{PV}_0$ is rescaled to equal $S-S^*$, so the forward is
+unchanged. A call is then worth most just before an ex-date. (A schedule more
+than twice off the forward is ignored in favour of the continuous yield.)
 
-\paragraph{Tests.} Tests check the tree against closed-form BSM for the European case, the
-published American put value (about 6.09 for $S=K=100$, $r=5\%$,
-$\sigma=20\%$, $T=1$), $P_A\ge P_E$ and $P_A\ge$ intrinsic, and the
-McDonald-Schroder symmetry $P_A(S,K,r,q)=C_A(K,S,q,r)$; for dividends, that
-both models share the European price and that a call just before a large
-dividend is worth more with the discrete schedule.
+\subsection{The cost of ignoring early exercise}
 
-Prices are inverted by a safeguarded Newton iteration on the tree (European
-vega as the slope, bisection fallback). A price at or below intrinsic value, or
-at or above the spot (call) or strike (put), has no solution and is skipped and
-counted. Every slice also records the early-exercise premium at its fitted
-volatility and the first-order bias
-\begin{equation}
-  \text{premium}=V_A(\sigma)-V_E(\sigma),\qquad
-  \text{vol bias}\approx\frac{\text{premium}}{\mathcal V},
+Suppose a quote is the American price at the true volatility $\sigma$, but we
+invert it with a European model to get $\sigma_E$. Then
+$V_E(\sigma_E)=V_A(\sigma)=V_E(\sigma)+\mathrm{premium}$, and to first order
+\begin{equation}\label{eq:bias}
+  \sigma_E-\sigma\ \approx\ \frac{\mathrm{premium}}{\mathcal V}.
 \end{equation}
-the amount by which a European inversion overstates the volatility, together
-with the number of quotes whose premium exceeds half their bid-ask spread.
+A European inversion therefore \emph{overstates} volatility by premium over vega.
+The code reports this number for every slice in both modes.
 
-\paragraph{Forward from American mids.} Put-call parity holds for European
-prices, so the parity forward is corrected for the early-exercise premium of its
-own quotes. After a first parity estimate, the premium of every quote within 6\%
-of the forward is computed at its European volatility and subtracted from the
-mid, and the forward is re-estimated; three passes converge. On the demo this
-cuts the forward error from up to 0.33\% of $F$ (the expiry that falls on an
-ex-date) to about 0.01\%.
+% ---------------------------------------------------------------------
+\section{Implied volatility and the smile}\label{sec:smile}
 
-\paragraph{Size of the effects on the demo.} Against the generating surface,
-the tree with the dividend schedule and the corrected forward leaves a mean ATM
-error of $+0.003$ vol points (largest 0.07), where a European inversion of the
-same quotes overstates ATM vol by 0.27 points on average and up to 0.74. The
-exercise premium of out-of-the-money quotes is at most 0.5 vol points except for
-the two expiries that fall on or next to an ex-date (about 1.9 and 1.0).
+\subsection{Definition and inversion}\label{sec:iv}
 
-\section{Choosing the exercise and dividend model}\label{sec:choice}
+\begin{defn}{Implied volatility}
+For a quote $m$, the implied volatility $\sigma_{\mathrm{imp}}$ is the number for
+which the model price equals $m$: $\mathrm{Price}(\sigma_{\mathrm{imp}})=m$.
+\end{defn}
+
+Existence and uniqueness follow from two facts. The price is strictly increasing
+in $\sigma$ (positive vega), and it ranges over exactly the no-arbitrage interval
+as $\sigma$ goes from 0 to $\infty$. So a root exists iff $m$ is strictly inside
+the bounds, and then it is unique. The code finds it with Brent's method on
+$[10^{-5},5]$ for the European model and with a safeguarded Newton iteration on
+the tree for the American one (the European vega is used as the slope, with a
+bisection fallback). Quotes at or outside the bounds are skipped and counted,
+never clipped.
+
+\subsection{The smile}
+
+If Black--Scholes were true, $\sigma_{\mathrm{imp}}$ would be the same for every
+strike and expiry. It is not. Plotted against strike, equity-index implied
+volatility typically slopes down (a \emph{skew}: downside protection is
+expensive), and it varies with maturity (a \emph{term structure}). It is
+convenient to work with \emph{total variance} $w=\sigma^2T$ and log-moneyness
+$k=\ln(K/F)$, because arbitrage conditions become simple statements about
+$w(k,T)$.
+
+\subsection{Parametrizing one slice: raw SVI}\label{sec:svi-theory}
+
+Market quotes are a scattering of points. The surface needs a smooth function, so
+each expiry is fitted with Gatheral's \emph{raw SVI}:
+\begin{equation}\label{eq:svi}
+  w(k)=a+b\Bigl[\rho\,(k-m)+\sqrt{(k-m)^2+s^2}\Bigr],
+\end{equation}
+with $a$ the overall level, $b$ the angle between the wings, $\rho\in(-1,1)$ the
+skew (rotation), $m$ the horizontal shift and $s>0$ the smoothing of the vertex.
+It is a hyperbola: linear in the wings, as Lee's moment formula requires
+(total variance cannot grow faster than $2|k|$), and curved near the money.
+Admissible parameters satisfy $b\ge0$, $|\rho|<1$, $s>0$ and a nonnegative
+minimum variance
+\begin{equation}
+  a+b\,s\sqrt{1-\rho^2}\ \ge\ 0 .
+\end{equation}
+
+\subsection{Static arbitrage: butterflies and calendars}
+
+A surface that cannot be traded against must have a non-negative risk-neutral
+density in strike and non-decreasing option value in maturity.
+
+\begin{fact}{Butterfly condition (Durrleman)}
+The density of $S_T$ implied by a slice $w(k)$ is
+$\dfrac{g(k)}{\sqrt{2\pi w}}\,e^{-d_-^2/2}$ with $d_-=-k/\sqrt w-\sqrt w/2$, where
+\begin{equation}\label{eq:g}
+  g(k)=\Bigl(1-\frac{k\,w'}{2w}\Bigr)^2-\frac{w'^2}{4}\Bigl(\frac1w+\frac14\Bigr)+\frac{w''}{2}.
+\end{equation}
+So the slice admits no butterfly arbitrage iff $g(k)\ge0$ for all $k$.
+\end{fact}
+
+A \emph{butterfly spread} (long two options at $K$, short one each at $K\pm\delta$)
+has a non-negative payoff, so its price must be non-negative; in the limit
+$\delta\to0$ this says $\partial^2C/\partial K^2\ge0$ (Breeden--Litzenberger),
+which is positivity of the density above.
+
+\begin{fact}{Calendar condition}
+There is no calendar-spread arbitrage iff, for every $k$,
+$\partial w(k,T)/\partial T\ge0$: total variance cannot fall with maturity.
+\end{fact}
+
+\paragraph{SSVI: arbitrage-free by construction.} Gatheral and
+Jacquier's SSVI parametrizes the whole surface with an ATM total variance
+$\theta(T)=\sigma_{\mathrm{atm}}(T)^2T$ and a curvature function
+$\varphi(\theta)=\eta\,\theta^{-\gamma}$:
+\begin{multline}\label{eq:ssvi}
+  w(k,T)=\frac\theta2\Bigl(1+\rho\,\varphi k\\
+  +\sqrt{(\varphi k+\rho)^2+1-\rho^2}\Bigr).
+\end{multline}
+Each slice is exactly a raw SVI (with $a=\tfrac\theta2(1-\rho^2)$,
+$b=\tfrac{\theta\varphi}2$, $m=-\rho/\varphi$, $s=\sqrt{1-\rho^2}/\varphi$), and the
+surface is free of both arbitrages if $\theta$ is increasing,
+$\theta\varphi(1+|\rho|)<4$, $\theta\varphi^2(1+|\rho|)\le4$ and
+$0\le\partial_\theta(\theta\varphi)\le\frac{1+\sqrt{1-\rho^2}}{\rho^2}\,\varphi$. The
+project uses SSVI only to \emph{generate} its synthetic market
+(Section~\ref{sec:synthetic}); the pipeline then fits ordinary raw SVI to the
+noisy quotes and must find a surface that is again arbitrage-free.
+
+% =====================================================================
+\part{The algorithm}
+% =====================================================================
+
+\section{Architecture and data model}\label{sec:arch}
+
+The data flow is a straight line from quotes to a JSON file, with the pricing
+model as the only switch.
+
+\begin{center}\small
+\begin{tabular}{|L{3.4cm}|L{11.2cm}|}
+\hline
+Module & Role \\ \hline
+\texttt{synthetic.py} & the generated chain (SSVI truth, American prices, tick-sized quotes) \\ \hline
+\texttt{rates.py} & Bank of Canada curve, bootstrap, JSON snapshots \\ \hline
+\texttt{data.py} & quote filter, per-expiry rate, parity forward (with an optional mid adjustment) \\ \hline
+\texttt{bsm.py} & forward Black--Scholes price, Greeks, Brent inversion (European) \\ \hline
+\texttt{american.py} & CRR tree, discrete dividends, Newton inversion, early-exercise premium \\ \hline
+\texttt{svi.py} & raw SVI, constrained fit, butterfly and calendar checks \\ \hline
+\texttt{surface.py} & the pipeline, mesh, JSON writer and command line \\ \hline
+\texttt{api.py}, \texttt{static/} & file-backed API and the interactive 3D page \\ \hline
+\end{tabular}
+\end{center}
+
+The pipeline never repairs bad data. It \emph{counts} skipped quotes (below the
+mid floor, outside the arbitrage bounds, no root), \emph{lists} rejected expiries
+with their reason, and \emph{reports} a failed calendar check, so the output is
+honest about what it could and could not fit.
+
+\section{The algorithm in pseudo-code}\label{sec:algo}
+
+\begin{algobox}{Algorithm 1: BuildSurface}
+\begin{verbatim}
+input : chain, spot S, rate curve r(.), exercise in {european, american},
+        dividends (optional schedule)
+output: surface document
+
+ 1. clean <- FilterQuotes(chain)               # b>0, a>=b, spread<=35%
+ 2. for each row: T <- days/365, r <- r(T), D <- exp(-r*T)
+ 3. F <- ParityForward(clean)                  # Algorithm 2, per expiry
+ 4. if exercise = american:
+ 5.     repeat 3 times:
+ 6.         prem <- EarlyExercisePremium(clean rows within 6% of F)
+ 7.         F <- ParityForward(clean, mid - prem)    # corrected forward
+ 8. otm <- rows with (put and K<F) or (call and K>=F), and mid >= 0.05
+ 9. sigma <- Invert(otm)                       # Algorithm 3; count failures
+10. for each expiry:
+11.     if fewer than 5 usable quotes: reject, record the reason
+12.     else: params <- FitSVI(k=ln(K/F), w=sigma^2*T)   # Algorithm 4
+13.            on failure: reject, record the reason
+14. check dw/dT >= 0 across fitted expiries    # report, never repair
+15. mesh <- 6 interpolated rows between expiries (linear in w; no
+                                                       extrapolation)
+16. write surface atomically as JSON
+\end{verbatim}
+\end{algobox}
+
+\begin{algobox}{Algorithm 2: ParityForward (one expiry)}
+\begin{verbatim}
+input : mids of calls C(K), puts P(K), discount D, spot S
+output: forward F
+
+1. pairs <- strikes K that have both a call and a put
+2. for each pair: Fhat <- K + (C - P)/D            # equation (fhat)
+3. near <- the 3 pairs with smallest |K - S|
+4. return median of Fhat over near
+\end{verbatim}
+\end{algobox}
+
+\begin{algobox}{Algorithm 3: Invert (mids to implied volatilities)}
+\begin{verbatim}
+european : for each row, if D*max(F-K,0) < m < D*F (call) or the put bounds:
+               sigma <- Brent root of BSM(sigma) - m on [1e-5, 5]
+           else count as arbitrage_bounds; no root -> solver_bracket
+american : for each (expiry, side), q <- r - ln(F/S)/T
+               prices outside (intrinsic, S or K)   -> NaN, counted
+               sigma0 <- 0.2
+               repeat up to 40 times:
+                   err <- TreePrice(sigma) - m      # all strikes at once
+                   narrow the bracket [lo, hi] using sign(err)
+                   sigma <- sigma - err / vega_BSM  # Newton step
+                   if the step leaves [lo, hi]: sigma <- (lo + hi)/2
+                   stop when max |change| < 1e-9
+\end{verbatim}
+\end{algobox}
+
+\begin{algobox}{Algorithm 4: FitSVI (one expiry)}
+\begin{verbatim}
+input : points (k_i, w_i), i = 1..n  with n >= 5
+output: parameters (a, b, rho, m, s)
+
+1. grid <- the k_i plus 201 points on [min k - 0.5, max k + 0.5]
+2. minimize  sum_i (w(k_i) - w_i)^2 / mean(w)^2        # SLSQP, ftol 1e-10
+     subject to  b >= 0,  |rho| <= 1-1e-6,  s >= 1e-6,
+                 a + b*s*sqrt(1-rho^2) >= 0,
+                 g(k) >= 0 for every k in grid                (equation g)
+3. start from rho0 in {-0.5, 0, 0.5} (a0 = min(w)/2, b0 = range(w)/range(k),
+   m0 = argmin w, s0 = 0.1); keep the converged run with lowest objective
+4. if no run converged, or g(k) < 0 anywhere on the grid: reject (no clamp)
+\end{verbatim}
+\end{algobox}
+
+\begin{algobox}{Algorithm 5: TreePrice (CRR with escrowed dividends)}
+\begin{verbatim}
+input : S, K, T, r, q, sigma, side, steps n, optional dividend schedule
+ 1. dt <- T/n;  u <- exp(sigma*sqrt(dt));  d <- 1/u
+ 2. p <- (exp((r-q)*dt) - d)/(u - d);  require 0 < p < 1
+ 3. if a schedule applies: S* <- S*exp(-q*T), drift <- r,
+        owed_t <- schedule PV at each level, rescaled so owed_0 = S - S*
+    else: S* <- S, drift <- r - q, owed_t <- 0
+ 4. V[n, j] <- payoff(S* u^(2j-n))                    # terminal nodes
+ 5. for level i = n-1 down to 0:
+        V[i, j] <- exp(-r*dt) * (p*V[i+1, j+1] + (1-p)*V[i+1, j])
+        V[i, j] <- max(V[i, j], payoff(S* u^(2j-i) + owed_i))   # American
+ 6. return V[0, 0]      # the code averages the n-step and (n+1)-step trees
+\end{verbatim}
+\end{algobox}
+
+\paragraph{Complexity.} A tree costs $O(n^2)$ per option, but all strikes of one
+expiry and side share the same tree shape, so they are priced in one vectorized
+array. With $n=200$ the whole demo (780 quotes in, 633 past the quality
+filter, 240 out-of-the-money quotes inverted over 12 fitted expiries, plus three
+forward-correction passes) takes about ten seconds; the European variant takes
+about five.
+
+\section{The variants and the defaults}\label{sec:choice}
 
 Two switches control how mids become volatilities. \texttt{--exercise} picks the
 pricing model and \texttt{--dividends} picks how the American tree realises
 dividends.
 
 \begin{center}\small
-\begin{tabular}{|L{3.3cm}|L{5.5cm}|L{5.7cm}|}
+\begin{tabular}{|L{3.1cm}|L{5.6cm}|L{5.8cm}|}
 \hline
  & \texttt{european} & \texttt{american} (default) \\ \hline
-Price & closed-form forward BSM & CRR tree with the right to exercise early \\ \hline
-Module and solver & \texttt{bsm.py}, Brent, one quote at a time &
-\texttt{american.py}, safeguarded Newton, vectorized per expiry and side \\ \hline
+Price & closed-form forward BSM, equation~\eqref{eq:bsm} & CRR tree with early exercise, \eqref{eq:tree} \\ \hline
+Module and solver & \texttt{bsm.py}, Brent, one quote at a time & \texttt{american.py}, safeguarded Newton, vectorized per expiry and side \\ \hline
 Forward & raw put-call parity & parity corrected for early exercise (3 passes) \\ \hline
 Extra inputs & none & implied yield $q$, optionally a dividend schedule \\ \hline
 Demo run time & about 5\,s & about 10\,s \\ \hline
-Mean ATM error vs truth & $+0.27$ vol points (worst 0.74) & $+0.003$ (worst
-0.07) \\ \hline
+Mean ATM error vs truth & \atmErrEuropean\ vol points (worst \atmWorstEuropean) & \atmErrAmerican\ (worst \atmWorstAmerican) \\ \hline
 \end{tabular}
 \end{center}
 
-An American option is worth at least a European one,
-$V_A(\sigma)=V_E(\sigma)+\text{premium}$, so a European inversion of American
-quotes overstates the volatility by about $\text{premium}/\mathcal V$, and
-parity, a European identity, biases the forward as well. \texttt{american} is the
-default because \texttt{XIU} options are American-style. \texttt{european} is kept
-for speed and as the baseline that shows how much early exercise matters; both
-modes record the premium and bias of every slice.
+\texttt{american} is the default because \texttt{XIU} options \emph{are}
+American-style, and by \eqref{eq:bias} the European model overstates their
+volatility. \texttt{european} is kept for speed and as the baseline that shows how
+much early exercise matters; both modes still record the premium and bias of every
+slice.
 
 \begin{center}\small
-\begin{tabular}{|L{3.3cm}|L{5.5cm}|L{5.7cm}|}
+\begin{tabular}{|L{3.1cm}|L{5.6cm}|L{5.8cm}|}
 \hline
  & \texttt{schedule} & \texttt{continuous} \\ \hline
 Dividends & discrete cash payments at known dates & a smooth yield $q$ over the life \\ \hline
 Exercise valued on & $S^*+\mathrm{PV}_t$ & $S$ \\ \hline
 Call before an ex-date & worth most & understated \\ \hline
-Default & the demo & any run without a schedule \\ \hline
+Default & the demo (it knows its own schedule) & any run without a schedule \\ \hline
 \end{tabular}
 \end{center}
 
 The demo's generating process pays discrete dividends, so the schedule recovers
-the truth and the continuous yield overstates ATM volatility; a test asserts
-that the schedule's mean ATM error is less than half of the continuous one's.
+the truth and the continuous yield overstates ATM volatility (mean error
+\atmErrContinuous\ vol points); a test asserts that the schedule's error is less
+than half of the continuous one's.
 
-\section{Output and diagnostics}\label{sec:output}
+\subsection{Correcting the forward for early exercise}\label{sec:fcorr}
 
-The pipeline writes one JSON document (schema version 2) to
-\texttt{data/surface.json}. It contains \texttt{meta} (source, synthetic flag,
-exercise and dividend model, the rate curve and the counts of skipped quotes),
-\texttt{calendar} (pass, fail or not checked, with the violating pairs),
-\texttt{rejected} (expiry and reason), one entry per fitted expiry and the
-\texttt{grid} of the 3D mesh. Each fitted expiry carries its SVI parameters, the
-RMSE in vol points, the zero rate, the implied dividend yield, the
-early-exercise bias (maximum, median, and the number of quotes whose premium
-exceeds half their spread), the observed quotes with their bid and ask, and the
-smile, total-variance and Durrleman $g$ grids. Non-finite numbers are written as
-\texttt{null}, and the file is replaced atomically so the API never reads a
-partial file.
+Parity \eqref{eq:parity} is a European identity, so on American mids the estimate
+\eqref{eq:fhat} is biased. The fix subtracts each near-the-money quote's own
+premium before applying parity. After a first estimate, the premium of every quote
+within 6\% of the forward is computed at its European volatility (Section
+\ref{sec:american}) and subtracted from its mid, and the forward is re-estimated;
+three passes converge. On the demo this cuts the forward error on the expiry that
+falls on an ex-date from 0.33\% to about 0.01\% of $F$.
 
-Skipped quotes are counted in three classes: below the mid floor, outside the
-arbitrage bounds, and without a root in the solver bracket. The page shows these
-counts, the rejected expiries with their reasons, and the pass or fail of the
-three checks (minimum variance, butterfly, calendar) for the selected expiry.
+\section{Numerical details and safeguards}\label{sec:numerics}
 
-\section{Validation and results}\label{sec:results}
+\begin{itemize}
+  \item \textbf{Reject, do not repair.} Quotes outside the arbitrage bounds,
+        expiries whose fit violates $g\ge0$, and a failed calendar check are
+        reported with a reason. Nothing is clipped into apparent validity.
+  \item \textbf{Constraints, not penalties.} Butterfly freedom is imposed as a
+        constraint of the SVI fit on a grid that extends well beyond the quotes
+        (0.5 in $k$), then re-checked on the same grid.
+  \item \textbf{Tree validity.} The probability $p$ must lie in $(0,1)$; the
+        inversion therefore starts above a floor $\sigma>|r-q|\sqrt{\Delta t}$.
+  \item \textbf{Local optimizer.} SLSQP with three starts is a local, not a global,
+        method. On the demo one thin expiry (8 quotes, on an ex-date) can be
+        rejected on some platforms; it is then reported, not repaired.
+  \item \textbf{Determinism.} The synthetic chain uses a fixed seed. Tests are
+        offline, and live data is only fetched with an explicit flag, at one
+        request per expiry, with a pause, no retries and a 30-minute cooldown.
+  \item \textbf{Atomic output.} The JSON is written to a temporary file and
+        renamed, so the API never reads a partial file; non-finite numbers become
+        \texttt{null}.
+\end{itemize}
 
-All tests are offline and deterministic. They cover, among others: the BSM
-Greeks against finite differences; the tree against closed-form BSM, a published
-American put, dominance of the American price, put-call symmetry and the effect
-of discrete dividends; the rate curve (conversion, bootstrap on flat and sloped
-curves, stale or missing prints, a mocked single Valet request); the SSVI
-conditions and the exact raw-SVI form of each slice; the generated chain
-(determinism, ticks, spreads, expiry dates, Good Friday); the parity forward
+% =====================================================================
+\part{A worked example}
+% =====================================================================
+
+\section{The synthetic market}\label{sec:synthetic}
+
+Because no real quotes are available the market is generated, in three stages.
+
+\paragraph{1. A truth surface.} The true surface is the SSVI
+\eqref{eq:ssvi} with ATM volatility $\sigma_{\mathrm{atm}}(T)$ rising from
+11.5\% to 13.5\% (the realized volatility of \texttt{XIU.TO} was 8.8--10.9\% in
+January 2025), $\rho=-0.65$, $\eta=0.9$ and $\gamma=0.4$. The code verifies the
+SSVI conditions of Section~\ref{sec:smile} on $(0,3]$ years and tests that every
+slice has $g\ge0$. A 3-month 90\%-moneyness put then trades about 3.5 vol points
+above the ATM level, a realistic index skew.
+
+\paragraph{2. Real inputs.} Spot (37.70) and the four trailing quarterly
+dividends come from one free Yahoo history request (derived statistics only, no
+price series stored); the next year's dividends are the same four, shifted by
+364 days. The risk-free curve is the Bank of Canada snapshot above.
+
+\paragraph{3. American prices and tick-sized quotes.} For every third-Friday
+expiry and strike, the option is priced with the discrete-dividend American tree
+at the \emph{truth} volatility. The mid is then perturbed by a seeded random
+shift of up to a quarter spread, and bid and ask are placed around it with a
+spread of $\max(0.02,\,5\%\text{ of the mid})$, rounded outwards to the 0.01
+tick; bids that round to zero are zero. This gives 780 quotes over 13 expiries,
+with the same kinds of defects as a real chain (wide spreads far out of the money,
+zero bids, thin volume).
+
+\noindent The pipeline thus faces exactly the effect it must undo: the quotes are
+American and the dividends discrete. (An earlier version priced and inverted with
+the same continuous-yield tree, which hid the bias that Section~\ref{sec:results}
+now measures.)
+
+\section{Walkthrough: one expiry, step by step}\label{sec:walkthrough}
+
+We follow the expiry of \textbf{21 March 2025} ($T=0.2137$ years, 78 days after the
+valuation date 2 January 2025, spot $S=37.70$).
+
+\subsection{The raw quotes}
+
+Table below shows the strikes around the money. Each row is a strike; the left
+block is the call and the right block the put. A star marks a quote the filter
+removes: zero bid, or a relative spread above 35\%.
+
+\input{generated/quotes_table.tex}
+
+The full expiry has \nRaw\ quotes and \nPass\ survive the filter; the rest are
+far-out-of-the-money options priced at a few ticks, where the spread is a large
+fraction of the price.
+
+\subsection{Rate, discount and forward}
+
+At $T=0.2137$ the curve gives $r=3.156\%$ and $D=e^{-rT}=0.9933$. The forward
+from the three at-the-money pairs, equation~\eqref{eq:fhat}:
+
+\input{generated/parity_table.tex}
+
+The median is $37.718$. The three estimates disagree by about 3 cents, a hint of
+the noise the median guards against. They also carry a systematic error: the
+mids are American. Subtracting each pair's early-exercise premium (Section
+\ref{sec:fcorr}) moves the forward to $37.708$, $37.705$ and $37.704$ over the
+three passes. The generating forward is $37.7005$, so the raw estimate was
+1.8 cents (0.05\%) too high and the corrected one is 0.4 cents (0.01\%) off.
+
+\subsection{Implied volatilities, two ways}
+
+Only out-of-the-money quotes are inverted (puts below $F=37.70$, calls above).
+$\sigma_E$ treats the mid as a European price; $\sigma_A$ inverts it with the
+American tree and the dividend schedule; the last column is the true volatility
+from the generating surface.
+
+\input{generated/otm_table.tex}
+
+The European volatility is higher at every strike, by 0.04 to 0.31 vol points,
+and the gap is largest just above the forward: that is the early-exercise
+bias of equation~\eqref{eq:bias}. The tree's $\sigma_A$ is within 0.2 vol points
+of the truth at every strike, with errors of both signs (the remaining noise is
+the random quote shift and the forward estimate), whereas $\sigma_E$ is off by up
+to 0.4 points and always on the high side.
+
+\subsection{The SVI fit and its checks}
+
+\begin{figure}[ht]
+\centering
+\input{generated/fig_smile.tex}
+\caption{The 21 March smile. The inverted quotes (dots) are noisy at the level of
+a hundredth of a vol point; the SVI fit (blue) is indistinguishable from the true
+surface (dashed gray) on the quoted range.}
+\end{figure}
+
+\begin{center}
+\begin{minipage}{0.48\textwidth}
+\input{generated/svi_table.tex}
+\end{minipage}
+\end{center}
+
+The fitted minimum variance $a+bs\sqrt{1-\rho^2}$ is zero to rounding: the
+constraint is \emph{active}, i.e.\ the optimizer pushed the vertex to the
+boundary of the admissible region. The butterfly function stays positive
+($\min g=\mathbf{0.57}$ on the grid), so the density is non-negative.
+
+\subsection{Across all expiries}
+
+\input{generated/expiry_table.tex}
+
+(Column key: $F$ forward, $r$ and $q$ the zero rate and implied dividend yield in
+percent, $n$ the number of quotes used, ``max bias'' the largest early-exercise
+vol bias of the slice in vol points.) Two things stand out. The 21 February
+and 21 November expiries have large biases (up to 1.9 and 1.0 points): both fall
+on or next to an ex-dividend date, where a call is worth exercising. The 17
+January expiry (15 days) is absent: it has only three usable quotes and is
+reported as rejected.
+
+\begin{figure}[ht]
+\centering
+\input{generated/fig_smiles.tex}
+\caption{All twelve fitted smiles. Short expiries are steeper and the skew
+flattens with maturity. The calendar condition $\partial_Tw\ge0$, which the code
+checks on total variance over the common strike range, holds.}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\input{generated/fig_term.tex}
+\caption{ATM volatility term structure: fitted values (dots) against the true
+curve (dashed).}
+\end{figure}
+
+\subsection{The same steps in Python}\label{sec:python}
+
+Everything above can be reproduced from a Python session. The snippets are run by
+\texttt{docs/\allowbreak build\_\allowbreak walkthrough.py}, and the output shown is what the code printed,
+so it cannot drift from the library.
+
+\input{generated/python_session.tex}
+
+\section{Results}\label{sec:results}
+
+Against the known generating surface (12 of 13 expiries fit):
+
+\input{generated/results_table.tex}
+
+(All in volatility points.) The pipeline with the American tree and the discrete
+dividend schedule recovers the ATM level to well under a tenth of a vol point on
+average. Treating the same quotes as European overstates ATM volatility by
+\atmErrEuropean\ points on average and up to \atmWorstEuropean, and the worst single
+quote is off by \quoteWorstEuropean\ points. A continuous yield improves on
+this but not by much (\atmErrContinuous\ points against
+\atmErrEuropean): the bias comes mostly from calls just before ex-dividend dates,
+which only the discrete schedule values correctly. The forward correction of
+Section~\ref{sec:fcorr} is part of the default: without it the forward of the
+ex-date expiry is off by 0.33\% and its smile by about one vol point.
+
+\paragraph{What the tests cover.} The BSM Greeks against finite differences; the
+tree against closed-form BSM, against a published American put value (about 6.09
+for $S=K=100$, $r=5\%$, $\sigma=20\%$, $T=1$), dominance of the American price,
+and put-call symmetry; discrete versus continuous dividends; the rate curve
+(conversion, bootstrap on flat and sloped curves, stale prints, a mocked single
+Valet request); the SSVI conditions and exact raw-SVI form of every slice; the
+generated chain (determinism, ticks, spreads, Good Friday); the forward
 correction; and the whole pipeline against the generating surface.
 
-Measured on the demo against the generating surface (12 of 13 expiries fit; the
-15-day expiry has too few usable quotes and is listed as rejected):
+% =====================================================================
+\part{Limitations and further reading}
+% =====================================================================
+
+\section{Limitations and extensions}
+
+\begin{itemize}
+  \item \textbf{Synthetic data.} No real quote has been used. Real chains add
+        stale quotes, crossed markets and irregular strikes; the pipeline's
+        reject-and-report design is aimed at that, but it has not been tested on
+        it.
+  \item \textbf{Constant-volatility tree.} The American price inside the pipeline
+        uses a flat volatility per quote (the usual convention) rather than a
+        local-volatility or stochastic-volatility model.
+  \item \textbf{Dividends.} The expected schedule is the trailing four, repeated
+        with no growth, and dividends are discounted at the expiry's own zero
+        rate.
+  \item \textbf{Rates.} A single snapshot (2025-01-02), flat beyond two years.
+  \item \textbf{Fit.} Local multi-start SLSQP. The grid-based butterfly check
+        cannot rule out violations between grid points.
+  \item \textbf{Extensions.} Real data through a licensed feed; a calendar
+        constraint inside the fit; a discrete-dividend tree with growth; and
+        pricing exotics off the calibrated surface.
+\end{itemize}
+
+\begin{thebibliography}{99}
+\bibitem{bs73} F.~Black and M.~Scholes, The pricing of options and corporate
+liabilities, \emph{J. Political Economy} 81 (1973).
+\bibitem{b76} F.~Black, The pricing of commodity contracts, \emph{J. Financial
+Economics} 3 (1976).
+\bibitem{crr79} J.~Cox, S.~Ross and M.~Rubinstein, Option pricing: a simplified
+approach, \emph{J. Financial Economics} 7 (1979).
+\bibitem{lee04} R.~Lee, The moment formula for implied volatility at extreme
+strikes, \emph{Mathematical Finance} 14 (2004).
+\bibitem{gat04} J.~Gatheral, A parsimonious arbitrage-free implied volatility
+parameterization with application to the valuation of volatility derivatives,
+Presentation, 2004.
+\bibitem{gj14} J.~Gatheral and A.~Jacquier, Arbitrage-free SVI volatility
+surfaces, \emph{Quantitative Finance} 14 (2014).
+\bibitem{dur05} P.~Durrleman, From implied to spot volatilities, PhD thesis,
+Princeton University, 2004.
+\bibitem{hull} J.~Hull, \emph{Options, Futures, and Other Derivatives}, Pearson.
+\bibitem{shreve} S.~Shreve, \emph{Stochastic Calculus for Finance II:
+Continuous-Time Models}, Springer, 2004.
+\end{thebibliography}
+
+\appendix
+\section{Symbols}
 
 \begin{center}\small
-\begin{tabular}{|L{6.3cm}|L{2.7cm}|L{2.7cm}|L{2.7cm}|}
+\begin{tabular}{|l|L{11.5cm}|}
 \hline
-Setting & Mean ATM error & Worst ATM error & Worst quote error \\ \hline
-American, schedule, corrected forward (default) & $+0.003$ & 0.07 & 0.31 \\ \hline
-European & $+0.27$ & 0.74 & 1.05 \\ \hline
+$S,\ F,\ K,\ T$ & spot, forward, strike, time to expiry (years, days$/365$) \\ \hline
+$r(T),\ D(T)$ & continuously compounded zero rate, $D=e^{-rT}$ \\ \hline
+$q$ & continuous dividend yield (the one implied by the forward) \\ \hline
+$\sigma,\ w$ & volatility, total variance $w=\sigma^2T$ \\ \hline
+$k$ & log-moneyness $\ln(K/F)$ \\ \hline
+$C,\ P,\ m$ & call, put, mid price \\ \hline
+$\Norm,\ \varphi$ & standard normal distribution function and density \\ \hline
+$\mathcal V$ & vega, $\partial C/\partial\sigma$ (per unit volatility) \\ \hline
+$a,b,\rho,m,s$ & raw SVI parameters \\ \hline
+$g(k)$ & Durrleman's butterfly function \\ \hline
+$\theta,\varphi,\eta,\gamma$ & SSVI: ATM total variance, curvature and its parameters \\ \hline
+$u,d,p,\Delta t,n$ & binomial tree up/down factors, probability, step and number of steps \\ \hline
+$S^*,\ \mathrm{PV}_t$ & dividend-free price and value of remaining dividends \\ \hline
 \end{tabular}
 \end{center}
 
-(all in volatility points). The forward error on the expiry that falls on an
-ex-date is 0.33\% of $F$ before the early-exercise correction and about 0.01\%
-after it. The ex-date expiry has only 8 quotes and its SVI fit is fragile: on
-some platforms the optimizer rejects it, and the pipeline reports it instead of
-repairing it.
+\section{Reproducing everything}
 
-\section{Raw SVI calibration and arbitrage checks}\label{sec:svi}
+Commands are run from the repository root.
 
-Raw SVI total variance with smoothing parameter $s$ (the code's \texttt{sigma}):
-\begin{equation}
-  w(k)=a+b\Bigl[\rho(k-m)+\sqrt{(k-m)^2+s^2}\Bigr].
-\end{equation}
+\begin{center}\small
+\begin{tabular}{|L{4.0cm}|L{10.6cm}|}
+\hline
+Task & Command \\ \hline
+Install & \texttt{uv sync} \\ \hline
+Build the surface & \texttt{uv run python -m tsx60\_iv.surface --demo} \\ \hline
+Serve the page & \texttt{uv run uvicorn tsx60\_iv.api:app --port 8000} \\ \hline
+Variants & add \texttt{--exercise european} or \texttt{--dividends continuous} \\ \hline
+Regenerate the tables and Python session in this document & \texttt{uv run python docs/\allowbreak build\_\allowbreak walkthrough.py} \\ \hline
+Rebuild this PDF & \texttt{tectonic docs/tsx60\_iv\_whitepaper.tex} \\ \hline
+Tests and lint & \texttt{uv run pytest} and \texttt{uv run ruff check .} \\ \hline
+\end{tabular}
+\end{center}
 
-\paragraph{Fit.} For one expiry with points $(k_i,w_i)$, \texttt{calibrate\_svi\_slice}
-solves
-\begin{equation}
-  \min_{a,b,\rho,m,s}\ \frac{1}{\bar w^{2}}\sum_i\bigl(w(k_i)-w_i\bigr)^2
-\end{equation}
-subject to the box bounds
-\begin{equation}
-  b\ge 0,\qquad -1+10^{-6}\le\rho\le 1-10^{-6},\qquad s\ge 10^{-6},
-\end{equation}
-with $a$ and $m$ free, and the nonlinear inequality constraint
-\begin{equation}
-  a+b\,s\sqrt{1-\rho^2}\ \ge\ 0
-\end{equation}
-(nonnegative minimum variance), and Durrleman's butterfly condition
-$g(k)\ge 0$ (below) on a grid of the quoted strikes plus 201 points on
-$[\min k-0.5,\ \max k+0.5]$. Butterfly freedom is therefore a constraint of the
-fit, not a repair applied afterwards. The solver is
-\texttt{scipy.\allowbreak optimize.\allowbreak minimize} (method SLSQP) with
-\texttt{ftol}$=10^{-10}$ and at most 1000 iterations. SLSQP handles the bounds
-and the inequalities together; L-BFGS-B is not used. It is run from three starting
-points, $\rho_0\in\{-0.5,0,0.5\}$, with $a_0=\tfrac12\min w$,
-$b_0=\max(\mathrm{range}(w)/\mathrm{range}(k),10^{-3})$, $m_0=\arg\min w$ and
-$s_0=0.1$; the converged run with the lowest objective is kept. This is a local
-multi-start, not a global optimizer. If no run converges the function raises
-\texttt{ValueError}.
+\section{The output document}
 
-\paragraph{Butterfly arbitrage.} With $y=k-m$, $R=\sqrt{y^2+s^2}$,
-$w'=b(\rho+y/R)$ and $w''=bs^2/R^3$, \texttt{check\_butterfly\_arbitrage}
-evaluates Durrleman's function on a grid:
-\begin{equation}
-  g(k)=\Bigl(1-\frac{k\,w'}{2w}\Bigr)^2-\frac{w'^2}{4}\Bigl(\frac1w+\frac14\Bigr)+\frac{w''}{2}\ \ge\ 0.
-\end{equation}
-After fitting, the same grid is checked again. If any point fails, the fit
-raises \texttt{ValueError}; it is never clamped or penalized into validity. The
-check is on a finite grid, so it cannot rule out violations between points.
-
-\paragraph{Calendar arbitrage.} \texttt{check\_calendar\_arbitrage} sorts slices
-by maturity, evaluates $w(k,T_j)$ on a common grid, and tests
-\begin{equation}
-  w(k,T_{j+1})-w(k,T_j)\ \ge\ 0
-\end{equation}
-for every pair of adjacent expiries, which is the discrete form of
-$\partial_T w(k,T)\ge 0$. It returns a boolean array and does not repair
-violations.
-
-\section{Synthetic chain}\label{sec:synthetic}
-
-The demo chain is generated, not observed. Its truth is a
-Gatheral-Jacquier SSVI surface,
-\begin{equation}
-  w(k,T)=\frac{\theta}{2}\Bigl(1+\rho\varphi k+\sqrt{(\varphi k+\rho)^2+1-\rho^2}\Bigr),\qquad
-  \theta=\sigma_{\mathrm{atm}}(T)^2T,\quad \varphi=\eta\,\theta^{-\gamma},
-\end{equation}
-which is exactly a Raw SVI slice with $a=\tfrac\theta2(1-\rho^2)$,
-$b=\tfrac{\theta\varphi}2$, $m=-\rho/\varphi$ and $s=\sqrt{1-\rho^2}/\varphi$.
-The code checks the no-arbitrage conditions $\theta$ increasing,
-$\theta\varphi(1+|\rho|)<4$, $\theta\varphi^2(1+|\rho|)\le 4$ and
-$0\le\partial_\theta(\theta\varphi)\le\frac{1+\sqrt{1-\rho^2}}{\rho^2}\varphi$ on
-$(0,3]$ years, and tests that each slice has $g\ge 0$. The ATM volatility
-rises from 11.5\% to 13.5\% (realized volatility of XIU.TO was 8.8--10.9\% in
-January 2025), with $\rho=-0.65$, $\eta=0.9$, $\gamma=0.4$: a 3-month 90\% put
-trades about 3.5 points above the ATM level.
-
-Expiries are monthly third Fridays (the Thursday before when that is Good
-Friday). Spot (37.70) and the four trailing quarterly dividends come from one
-free Yahoo history request (module \texttt{market\_params}, derived statistics
-only); the next year's dividends repeat them 364 days later. The forward is
-$F=(S-\mathrm{PV}(\text{dividends}))e^{rT}$ with the Bank of Canada curve.
-Each option is priced with the discrete-dividend American tree at the truth
-volatility, so the generating process contains the effect the inversion must
-undo (an earlier version generated and inverted with the same continuous-yield
-tree, which hid this error). Quotes then get
-0.01 ticks, a spread of $\max(0.02,\,0.05m)$ for mid $m$, and a seeded random
-shift of up to a quarter spread, so the chain is deterministic. The pipeline
-then recovers the truth to within 0.08 vol points at the money.
-This shows the machinery works on market-shaped quotes; it is not a market
-view.
-
-\section{Assumptions and limitations}
-
-\begin{itemize}
-  \item The risk-free curve is a single snapshot (2025-01-02) with flat
-        extrapolation beyond 2 years. A flat rate is still available with
-        \texttt{--rate}.
-  \item Montr\'eal Exchange \texttt{XIU} ETF options are American-style. The
-        default inversion uses the binomial tree and, for the demo, an expected
-        dividend schedule (the trailing four dividends repeated a year later,
-        with no growth). Without a schedule the tree falls back to a continuous
-        yield, which the tests show overstates ATM vol on the demo. Dividends
-        are discounted at the expiry's own zero rate, and the parity forward is
-        corrected for early exercise as described above.
-  \item The 0.35 relative-spread filter and the three-strike forward window are
-        fixed choices, not tuned on market data.
-  \item Calibration is a local multi-start and has been tested only on
-        synthetic smiles.
-\end{itemize}
+The pipeline writes \texttt{data/surface.json} (schema version 2): \texttt{meta}
+(source, synthetic flag, exercise and dividend model, the rate curve and the
+counts of skipped quotes); \texttt{calendar} (pass, fail or not checked, with the
+violating pairs); \texttt{rejected} (expiry and reason); one entry per fitted
+expiry with its SVI parameters, RMSE in vol points, zero rate, implied dividend
+yield, early-exercise bias, the observed quotes and the smile, total-variance and
+Durrleman grids; and the 3D \texttt{grid}. The API serves it with an ETag and
+answers 304 when the client already has the current version, and 503 until a file
+exists.
 
 \end{document}

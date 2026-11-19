@@ -2,6 +2,15 @@
 
 ## Session Log
 
+## 2026-11-20 — Whitepaper rewritten as a self-contained tutorial
+- **Model & Skills Used:** `sonnet` + `/ponytail:ponytail`
+- **Completed:**
+  - `docs/tsx60_iv_whitepaper.tex` rewritten in four parts: foundations (options, no-arbitrage pricing, forwards, rates and dividends, American options and the CRR tree, implied volatility, SVI/SSVI and arbitrage), the algorithm (module map, five pseudo-code algorithms, the exercise and dividend variants, safeguards), a worked example (synthetic market, one expiry step by step with real quote tables, a Python session, all expiries), and results, limits and references.
+  - `docs/build_walkthrough.py` computes every table, figure and the Python session output with the library (offline), into `docs/generated/*.tex`, so the PDF cannot drift from the code. TikZ figures are plain TikZ (no pgfplots).
+  - `uv run ruff check .` clean (per-file ignores for the generator); PDF builds with no LaTeX warnings.
+- **Key Decisions / Invariants:** Added `tikz` (needed for figures). Corrections made while writing: a continuous yield improves ATM error only slightly (+0.24 vs +0.27 vol pts European); the dividend schedule is what removes the bias.
+- **Next Step:** Look at the rendered PDF (no renderer was available when writing) and tighten wording or figures.
+
 ## 2026-11-20 — Shortcuts hardened: discrete dividends, forward correction, bootstrap
 - **Model & Skills Used:** `sonnet` + `/ponytail:ponytail`, built-in browser (DOM checks)
 - **Completed:**

@@ -46,7 +46,7 @@ selected expiry (Fit, No-arbitrage and Math tabs).
 | Restart the server | stop it (Ctrl+C), then `uv run uvicorn tsx60_iv.api:app --port 8000 --reload` |
 | Free port 8000 (PowerShell) | `Get-NetTCPConnection -LocalPort 8000 -State Listen \| ForEach-Object { Stop-Process -Id $_.OwningProcess }` |
 | Run the tests and lint | `uv run pytest` and `uv run ruff check .` |
-| Rebuild the PDF | `tectonic docs/tsx60_iv_whitepaper.tex` (needs [Tectonic](https://tectonic-typesetting.github.io/)) |
+| Rebuild the PDF | `tectonic docs/tsx60_iv_whitepaper.tex` (needs [Tectonic](https://tectonic-typesetting.github.io/)); first run `uv run python docs/build_walkthrough.py` if the code changed, to refresh its tables and Python session |
 
 The page re-checks `data/surface.json` every 30 s and never contacts Yahoo.
 Tests and CI are offline; live downloads only happen with an explicit flag.
@@ -333,7 +333,8 @@ reports it instead of repairing it.
 | `src/tsx60_iv/tracking.py` | optional MLflow logging |
 | `src/tsx60_iv/data_files/` | checked-in snapshots of the two anchors |
 | `tests/` | deterministic offline tests; `tests/fixtures/` holds the regression chain |
-| `docs/tsx60_iv_whitepaper.tex` / `.pdf` | the methods write-up |
+| `docs/tsx60_iv_whitepaper.tex` / `.pdf` | a self-contained tutorial: options and pricing basics, American vs European, the algorithm in pseudo-code, and a worked example with real quote tables and a Python session |
+| `docs/build_walkthrough.py`, `docs/generated/` | regenerate the tables, figures and Python session that the PDF includes (computed by the library itself) |
 | `docs/README.md` | architecture and function-by-function reference |
 
 ## Data anchors and live data
@@ -381,5 +382,5 @@ Known shortcuts:
   three-strike forward window and the 0.05 mid floor are fixed choices.
 - Montréal Exchange data is not used; the demo is synthetic by design.
 
-See `docs/tsx60_iv_whitepaper.pdf` for the full write-up and
+See `docs/tsx60_iv_whitepaper.pdf` for the full tutorial and write-up and
 `docs/PROGRESS.md` for the development log.
