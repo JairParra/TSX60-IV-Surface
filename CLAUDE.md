@@ -14,7 +14,11 @@
 - `src/tsx60_iv/bsm.py`: forward Black-Scholes pricing, Greeks, IV inversion.
 - `src/tsx60_iv/svi.py`: SVI parameterization, slice calibration, arbitrage checks.
 - `src/tsx60_iv/surface.py`: chain to implied vols to per-expiry SVI to `data/surface.json` (`python -m tsx60_iv.surface --demo`).
-- `src/tsx60_iv/synthetic.py`: synthetic chain behind the fixture and the demo.
+- `src/tsx60_iv/synthetic.py`: legacy fixture chain and the realistic demo chain (SSVI truth, American prices).
+- `src/tsx60_iv/american.py`: CRR American pricer, tree inversion, early-exercise bias.
+- `src/tsx60_iv/rates.py`: Bank of Canada curve (Valet snapshot), per-expiry zero rates.
+- `src/tsx60_iv/market_params.py`: free Yahoo-derived anchors (spot, realized vol, dividends).
+- `src/tsx60_iv/data_files/`: checked-in snapshots of the two anchors.
 - `src/tsx60_iv/static/index.html`: 3D surface page served by the API at `/`.
 - `src/tsx60_iv/tracking.py`: MLflow logging interface.
 - `src/tsx60_iv/api.py`: FastAPI surface-serving interface.

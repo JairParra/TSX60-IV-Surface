@@ -11,17 +11,21 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from tsx60_iv.american import american_implied_vols, early_exercise_bias
 from tsx60_iv.bsm import implied_volatility
 from tsx60_iv.data import estimate_forward_and_rates, fetch_xiu_chain
+from tsx60_iv.rates import RateCurve
 from tsx60_iv.svi import (
     calibrate_svi_slice,
     check_calendar_arbitrage,
     durrleman_g,
     raw_svi_variance,
 )
-from tsx60_iv.synthetic import DEMO_DAYS, RATE, SPOT, generate_xiu_sample_chain
+from tsx60_iv.synthetic import BOC_CURVE_PATH, generate_realistic_chain
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+DEFAULT_RATE = 0.0375  # flat CAD rate when no curve snapshot is given
+EXERCISES = ("european", "american")
 # shortcut: fixed 0.05 floor on mid; quotes on the tick floor give junk vols.
 # Make it relative to tick size and vega when real data arrives.
 MIN_MID = 0.05
@@ -37,20 +41,8 @@ def _floats(values: Any) -> list[float | None]:
     return [float(v) if np.isfinite(v) else None for v in np.asarray(values, float)]
 
 
-def _otm_implied_vols(
-    clean: pd.DataFrame, min_mid: float
-) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Invert out-of-the-money mids row by row, counting rows that cannot be."""
-    kind = clean["option_type"].str.lower()
-    is_otm = ((kind == "put") & (clean["strike"] < clean["forward"])) | (
-        (kind == "call") & (clean["strike"] >= clean["forward"])
-    )
-    otm = clean.loc[is_otm & (clean["mid"] >= min_mid)].copy()
-    counts = {
-        "below_min_mid": int((is_otm & (clean["mid"] < min_mid)).sum()),
-        "arbitrage_bounds": 0,
-        "solver_bracket": 0,
-    }
+def _european_vols(otm: pd.DataFrame, counts: dict[str, int]) -> np.ndarray:
+    """Invert mids with forward BSM row by row, counting rows that fail."""
     vols: list[float] = []
     for row in otm.itertuples():
         try:
@@ -62,7 +54,7 @@ def _otm_implied_vols(
                         row.strike,
                         row.time_to_expiry,
                         row.discount,
-                        row.option_type.lower(),
+                        row.kind,
                     )
                 )
             )
@@ -71,11 +63,79 @@ def _otm_implied_vols(
                 "arbitrage_bounds" if "arbitrage" in str(exc) else "solver_bracket"
             ] += 1
             vols.append(np.nan)
-    otm["iv"] = vols
-    return otm.dropna(subset=["iv"]), counts
+    return np.array(vols)
 
 
-def _fit_slice(expiration: pd.Timestamp, g: pd.DataFrame) -> dict[str, Any]:
+def _american_vols(
+    otm: pd.DataFrame, spot: float, counts: dict[str, int]
+) -> np.ndarray:
+    """Invert mids with a binomial tree per expiry and side, counting failures."""
+    vols = np.full(len(otm), np.nan)
+    for _, g in otm.assign(pos=np.arange(len(otm))).groupby(["expiration", "kind"]):
+        first = g.iloc[0]
+        q = first["rate"] - np.log(first["forward"] / spot) / first["time_to_expiry"]
+        result = american_implied_vols(
+            g["mid"].to_numpy(),
+            spot,
+            g["strike"].to_numpy(),
+            first["time_to_expiry"],
+            first["rate"],
+            q,
+            first["kind"],
+        )
+        vols[g["pos"].to_numpy()] = result
+        is_call = first["kind"] == "call"
+        intrinsic = np.maximum(
+            (spot - g["strike"]) if is_call else (g["strike"] - spot), 0.0
+        )
+        upper = spot if is_call else g["strike"]
+        outside = ((g["mid"] <= intrinsic) | (g["mid"] >= upper)).to_numpy()
+        failed = np.isnan(result)
+        counts["arbitrage_bounds"] += int((failed & outside).sum())
+        counts["solver_bracket"] += int((failed & ~outside).sum())
+    return vols
+
+
+def _otm_implied_vols(
+    clean: pd.DataFrame, min_mid: float, spot: float, exercise: str
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Invert out-of-the-money mids and measure the early-exercise bias."""
+    kind = clean["option_type"].str.lower()
+    is_otm = ((kind == "put") & (clean["strike"] < clean["forward"])) | (
+        (kind == "call") & (clean["strike"] >= clean["forward"])
+    )
+    otm = clean.loc[is_otm & (clean["mid"] >= min_mid)].assign(kind=kind).copy()
+    counts = {
+        "below_min_mid": int((is_otm & (clean["mid"] < min_mid)).sum()),
+        "arbitrage_bounds": 0,
+        "solver_bracket": 0,
+    }
+    if exercise == "american":
+        otm["iv"] = _american_vols(otm, spot, counts)
+    else:
+        otm["iv"] = _european_vols(otm, counts)
+    otm = otm.dropna(subset=["iv"]).copy()
+    # Early-exercise premium at the fitted vol, and its first-order vol bias.
+    otm["premium"], otm["vol_bias"] = np.nan, np.nan
+    for _, g in otm.groupby(["expiration", "kind"]):
+        first = g.iloc[0]
+        premium, bias = early_exercise_bias(
+            g["iv"].to_numpy(),
+            spot,
+            first["forward"],
+            g["strike"].to_numpy(),
+            first["time_to_expiry"],
+            first["rate"],
+            first["kind"],
+        )
+        otm.loc[g.index, "premium"] = premium
+        otm.loc[g.index, "vol_bias"] = bias
+    return otm, counts
+
+
+def _fit_slice(
+    expiration: pd.Timestamp, g: pd.DataFrame, spot: float
+) -> dict[str, Any]:
     """Fit one expiry and precompute everything the page draws."""
     g = g.sort_values("log_moneyness")
     t = float(g["time_to_expiry"].iloc[0])
@@ -85,12 +145,21 @@ def _fit_slice(expiration: pd.Timestamp, g: pd.DataFrame) -> dict[str, Any]:
     grid = np.linspace(k.min() - pad, k.max() + pad, 81)
     w = raw_svi_variance(grid, *params)
     fit_iv = np.sqrt(raw_svi_variance(k, *params) / t)
+    rate, forward = float(g["rate"].iloc[0]), float(g["forward"].iloc[0])
+    half_spread = ((g["ask"] - g["bid"]) / 2.0).to_numpy()
     return {
         "expiration": expiration.date().isoformat(),
         "T": t,
         "days": round(t * 365),
-        "forward": float(g["forward"].iloc[0]),
+        "forward": forward,
         "discount": float(g["discount"].iloc[0]),
+        "rate": rate,
+        "dividend_yield": float(rate - np.log(forward / spot) / t),
+        "american": {
+            "max_vol_bias_pts": float(100 * np.max(np.abs(g["vol_bias"]))),
+            "median_vol_bias_pts": float(100 * np.median(np.abs(g["vol_bias"]))),
+            "n_material": int((g["premium"].to_numpy() > half_spread).sum()),
+        },
         "params": dict(zip(PARAM_NAMES, map(float, params), strict=True)),
         "n_points": len(g),
         "rmse_vol_pts": float(
@@ -160,16 +229,21 @@ def _mesh(slices: list[dict[str, Any]]) -> dict[str, Any]:
 def build_surface(
     chain: pd.DataFrame,
     spot: float,
-    rate: float,
+    rate: float | RateCurve,
     *,
     ticker: str,
     source: str,
     synthetic: bool,
     min_mid: float = MIN_MID,
+    exercise: str = "american",
 ) -> dict[str, Any]:
     """Build the surface document; rejected expiries are reported, never repaired."""
-    clean = estimate_forward_and_rates(chain, spot, rate)
-    otm, counts = _otm_implied_vols(clean, min_mid)
+    if exercise not in EXERCISES:
+        raise ValueError(f"exercise must be one of {EXERCISES}")
+    as_of = pd.Timestamp(chain["as_of"].iloc[0]).date().isoformat()
+    curve = rate if isinstance(rate, RateCurve) else RateCurve.flat(rate, as_of)
+    clean = estimate_forward_and_rates(chain, spot, curve)
+    otm, counts = _otm_implied_vols(clean, min_mid, spot, exercise)
     slices: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for expiration in sorted(clean["expiration"].unique()):
@@ -179,7 +253,7 @@ def build_surface(
             reason = f"only {len(g)} usable quotes (need {MIN_POINTS})"
         else:
             try:
-                slices.append(_fit_slice(stamp, g))
+                slices.append(_fit_slice(stamp, g, spot))
                 continue
             except ValueError as exc:
                 reason = str(exc)
@@ -210,12 +284,18 @@ def build_surface(
         "meta": {
             "schema_version": SCHEMA_VERSION,
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "as_of": pd.Timestamp(chain["as_of"].iloc[0]).date().isoformat(),
+            "as_of": as_of,
             "ticker": ticker,
             "source": source,
             "synthetic": synthetic,
             "spot": float(spot),
-            "rate": float(rate),
+            "exercise": exercise,
+            "rate_curve": {
+                "source": curve.source,
+                "as_of": curve.as_of,
+                "tenors": list(curve.tenors),
+                "zero_rates": list(curve.zero_rates),
+            },
             "min_mid": min_mid,
             "quotes_raw": len(chain),
             "quotes_after_quality_filter": len(clean),
@@ -247,14 +327,20 @@ def main() -> None:
     parser.add_argument("--ticker", default="XIU.TO")
     parser.add_argument("--max-expiries", type=int, default=6)
     parser.add_argument("--spot", type=float)
-    parser.add_argument("--rate", type=float, default=RATE)
+    parser.add_argument("--rate", type=float, help="flat CAD rate (default 3.75%%)")
+    parser.add_argument("--curve", type=Path, help="Bank of Canada curve snapshot")
+    parser.add_argument("--exercise", choices=EXERCISES, default="american")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--mlflow", action="store_true", help="log the run to MLflow")
     args = parser.parse_args()
 
+    if args.rate is not None and args.curve is not None:
+        raise SystemExit("pass either --rate or --curve, not both")
     if args.demo:
-        chain, spot = generate_xiu_sample_chain(DEMO_DAYS), SPOT
+        chain = generate_realistic_chain()
+        spot = float(chain["spot"].iloc[0])
         source, synthetic = "synthetic_demo", True
+        curve_path = args.curve or (None if args.rate is not None else BOC_CURVE_PATH)
     else:
         if args.fetch:
             fresh = args.chain.exists() and (
@@ -268,14 +354,21 @@ def main() -> None:
         if spot is None:
             raise SystemExit("chain has no spot column; pass --spot")
         source, synthetic = ("yahoo_live" if args.fetch else "cached_chain"), False
+        curve_path = args.curve
+    rate = (
+        RateCurve.from_json(curve_path)
+        if curve_path
+        else (DEFAULT_RATE if args.rate is None else args.rate)
+    )
 
     surface = build_surface(
         chain,
         spot,
-        args.rate,
+        rate,
         ticker=args.ticker if not args.demo else "XIU (synthetic)",
         source=source,
         synthetic=synthetic,
+        exercise=args.exercise,
     )
     write_surface(surface, args.out)
     meta = surface["meta"]
@@ -294,7 +387,8 @@ def main() -> None:
                 "ticker": meta["ticker"],
                 "as_of": meta["as_of"],
                 "spot": spot,
-                "rate": args.rate,
+                "rate_source": meta["rate_curve"]["source"],
+                "exercise": meta["exercise"],
             },
             {
                 "slices": float(len(surface["expiries"])),

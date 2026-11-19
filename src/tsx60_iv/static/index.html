@@ -181,7 +181,10 @@ function renderStatus() {
   $("details").replaceChildren();
   $("ribbon").hidden = !m.synthetic;
   $("ribbon").textContent = "SYNTHETIC DEMO: generated quotes, not market data";
-  badge(m.ticker); badge("as of " + m.as_of); badge("spot " + fmt(m.spot, 2)); badge("r " + fmt(m.rate * 100, 2) + "%");
+  const zr = m.rate_curve.zero_rates.map((v) => v * 100);
+  badge(m.ticker); badge("as of " + m.as_of); badge("spot " + fmt(m.spot, 2));
+  badge(`r ${fmt(Math.min(...zr), 2)}-${fmt(Math.max(...zr), 2)}% (${m.rate_curve.source})`);
+  badge(m.exercise === "american" ? "American-exercise tree" : "European BSM");
   if (cal.ok === true) badge("calendar: no arbitrage", "ok");
   else if (cal.ok === false) badge("calendar VIOLATED: " + cal.violations.map((v) => v.join(" to ")).join("; "), "bad");
   else badge("calendar: not checked " + (cal.note || "(one slice)"));
@@ -190,6 +193,7 @@ function renderStatus() {
   badge(`dropped: ${d.below_min_mid} below ${m.min_mid} mid, ${d.arbitrage_bounds} arbitrage, ${d.solver_bracket} no root`, "", "details");
   badge("built " + ageText(m.generated_at), "", "details");
   badge(`source ${m.source}`, "", "details");
+  badge(`rate curve as of ${m.rate_curve.as_of}`, "", "details");
 }
 
 function draw3d() {
@@ -266,6 +270,9 @@ function drawArb(sl) {
   const checks = [
     [minVariance(sl.params) >= 0, `Minimum variance ${fmt(minVariance(sl.params), 6)} >= 0`],
     [sl.min_g >= 0, `Butterfly: min g(k) = ${fmt(sl.min_g, 5)} >= 0`],
+    [sl.american.n_material === 0,
+      `Early exercise: vol bias at most ${fmt(sl.american.max_vol_bias_pts, 2)} pts (median ${fmt(sl.american.median_vol_bias_pts, 2)}); ` +
+      `${sl.american.n_material} of ${sl.n_points} quotes have premium above half the spread`],
     [S.calendar.ok, S.calendar.ok === true ? "Calendar: w never falls with maturity"
       : S.calendar.ok === false ? "Calendar VIOLATED: " + S.calendar.violations.map((v) => v.join(" to ")).join("; ")
       : "Calendar: needs two fitted expiries with a shared strike range"],
@@ -296,12 +303,16 @@ function drawArb(sl) {
 
 function drawMath(sl) {
   const p = sl.params;
-  $("formulas").innerHTML = ["f1", "f2", "f3", "f4", "f5", "f6"]
+  $("formulas").innerHTML = ["f1", "f2", "f2b", "f3", "f4", "f5", "f6"]
     .map((id) => `<div id="${id}"></div><p id="${id}n" class="muted"></p>`).join("");
   tex("f1", "F(T)=\\operatorname*{median}_{3\\text{ nearest-ATM}}\\bigl[K_i+e^{rT}(C_i-P_i)\\bigr],\\quad k=\\ln\\frac{K}{F}");
-  $("f1n").textContent = `Here T = ${fmt(sl.T, 4)}, F = ${fmt(sl.forward, 4)}, D = e^(-rT) = ${fmt(sl.discount, 5)}, r = ${fmt(S.meta.rate * 100, 2)}%.`;
+  $("f1n").textContent = `Here T = ${fmt(sl.T, 4)}, F = ${fmt(sl.forward, 4)}, r(T) = ${fmt(sl.rate * 100, 3)}% from the curve, D = e^(-rT) = ${fmt(sl.discount, 5)}, implied dividend yield q = ${fmt(sl.dividend_yield * 100, 2)}%.`;
   tex("f2", "C=D\\,[F\\,\\Phi(d_1)-K\\,\\Phi(d_2)],\\quad d_{1,2}=\\frac{-k\\pm\\tfrac12\\sigma^2T}{\\sigma\\sqrt T}");
-  $("f2n").textContent = "Each OTM mid is inverted to sigma with Brent's method; quotes that break the no-arbitrage price bounds are dropped and counted.";
+  $("f2n").textContent = "Each OTM mid is inverted to sigma (Brent for European, bracketed Newton on the tree for American); quotes that break the no-arbitrage price bounds are dropped and counted.";
+  tex("f2b", "V_{i,j}=\\max\\Bigl(\\text{payoff}_{i,j},\\;e^{-r\\Delta t}\\bigl[p\\,V_{i+1,j+1}+(1-p)\\,V_{i+1,j}\\bigr]\\Bigr),\\quad p=\\frac{e^{(r-q)\\Delta t}-d}{u-d}");
+  $("f2bn").textContent = S.meta.exercise === "american"
+    ? `XIU options are American-style, so mids are inverted with this binomial tree (q from the parity forward). Early-exercise premium at the fitted vol is at most ${fmt(sl.american.max_vol_bias_pts, 2)} vol pts here.`
+    : `Mids were inverted with European BSM; the tree premium here would overstate vol by up to ${fmt(sl.american.max_vol_bias_pts, 2)} pts.`;
   tex("f3", "w(k)=a+b\\Bigl[\\rho\\,(k-m)+\\sqrt{(k-m)^2+\\varsigma^2}\\Bigr]");
   $("f3n").textContent = `Fitted: a = ${fmt(p.a, 5)}, b = ${fmt(p.b, 5)}, rho = ${fmt(p.rho, 4)}, m = ${fmt(p.m, 4)}, varsigma = ${fmt(p.sigma, 4)}  (${sl.n_points} quotes).`;
   tex("f4", "a+b\\,\\varsigma\\sqrt{1-\\rho^2}\\;\\ge\\;0");

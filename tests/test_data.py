@@ -163,3 +163,19 @@ def test_fetch_empty_chain_raises(
     monkeypatch.setattr(data.yf, "Ticker", Empty)
     with pytest.raises(ValueError, match="no options"):
         data.fetch_xiu_chain("XIU.TO", tmp_path / "c.parquet")
+
+
+def test_rate_curve_gives_each_expiry_its_own_rate() -> None:
+    """A downward-sloping curve changes discounts per expiry; a float still works."""
+    from tsx60_iv.rates import RateCurve
+
+    chain = pd.read_parquet(FIXTURE)
+    curve = RateCurve("2025-01-02", (0.01, 2.0), (0.04, 0.02), "test")
+    enriched = estimate_forward_and_rates(chain, spot=38.50, r_cad=curve)
+    per_expiry = enriched.groupby("time_to_expiry")["rate"].first()
+    assert per_expiry.is_monotonic_decreasing and per_expiry.nunique() == 4
+    assert np.allclose(
+        enriched["discount"], np.exp(-enriched["rate"] * enriched["time_to_expiry"])
+    )
+    flat = estimate_forward_and_rates(chain, spot=38.50, r_cad=0.03)
+    assert (flat["rate"] == 0.03).all()

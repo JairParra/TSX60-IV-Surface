@@ -19,18 +19,23 @@
   \item \textbf{Implemented:} \texttt{data.py} (quote filtering, forwards),
         \texttt{bsm.py} (pricing, Greeks, implied volatility),
         \texttt{svi.py} (Raw SVI, calibration, arbitrage checks),
+        \texttt{american.py} (binomial pricer, tree inversion, early-exercise
+        bias), \texttt{rates.py} (Bank of Canada curve),
+        \texttt{market\_params.py} (free Yahoo-derived anchors),
         \texttt{surface.py} (the pipeline below, writing \texttt{surface.json})
         and \texttt{api.py} (serves that file and an interactive 3D page).
         Each has offline tests.
   \item \textbf{Optional:} \texttt{tracking.py} (an MLflow logging call) runs
         only with the \texttt{--mlflow} flag and is not covered by tests.
   \item \textbf{Data:} Yahoo Finance returns no options for \texttt{XIU.TO}, so
-        there is no live XIU source yet. Every result here comes from a
-        \emph{synthetic} chain (\texttt{synthetic.py}, also the source of the
-        offline test fixture
+        there is no live XIU source yet and none is planned. Every result here
+        comes from a \emph{synthetic} chain (\texttt{synthetic.py}; its small
+        legacy form is the offline test fixture
         \texttt{tests/fixtures/\allowbreak xiu\_\allowbreak sample\_\allowbreak chain.parquet}).
-        It contains no market quotes, and the page labels it as a synthetic
-        demo. A live download for a Yahoo-listed ticker happens only with an
+        It contains no market quotes, though its inputs are real: the Bank of
+        Canada curve of 2025-01-02 and XIU.TO's closing spot, realized
+        volatility and dividends (Section~\ref{sec:synthetic}). The page labels
+        the surface a synthetic demo. A live download for a Yahoo-listed ticker happens only with an
         explicit \texttt{--fetch}, at one request per expiry.
 \end{itemize}
 
@@ -40,15 +45,17 @@
 \begin{enumerate}
   \item Filter quotes: keep $b>0$, $a\ge b$, mid $m=(a+b)/2$ finite and
         $(a-b)/m\le 0.35$.
-  \item Set $T=\mathrm{days}(t_{\mathrm{exp}}-t_0)/365$ and $D(T)=e^{-rT}$;
+  \item Set $T=\mathrm{days}(t_{\mathrm{exp}}-t_0)/365$ and $D(T)=e^{-r(T)T}$
+        with $r(T)$ from the Bank of Canada curve (Section~\ref{sec:rates});
         drop expiries with $T\le 0$.
   \item Estimate $F(T)$ by put-call parity (Section~\ref{sec:forward}); drop
         expiries with no call/put pair.
   \item Compute $k=\ln(K/F(T))$; keep out-of-the-money quotes (puts for
         $K<F$, calls for $K\ge F$) with mid $\ge 0.05$.
-  \item Invert each mid to $\sigma$ with Brent's method, one row at a time
-        (Section~\ref{sec:iv}); count and skip rows that fail; set
-        $w=\sigma^2T$.
+  \item Invert each mid to $\sigma$, one row at a time, with the American
+        tree (default) or forward BSM and Brent's method
+        (Sections~\ref{sec:iv} and~\ref{sec:american}); count and skip rows
+        that fail; set $w=\sigma^2T$.
   \item Fit Raw SVI per expiry (at least 5 points) by constrained multi-start
         SLSQP (Section~\ref{sec:svi}); list the expiry as rejected if the fit
         fails or has butterfly arbitrage.
@@ -62,6 +69,24 @@ fitted expiries plus six rows between each pair, where total variance is
 linear in $T$ at fixed $k$ (this preserves calendar monotonicity). Cells
 outside the quoted strikes of the neighbouring expiries are left empty, not
 extrapolated.
+
+\section{Risk-free curve}\label{sec:rates}
+
+\texttt{rates.py} reads one Bank of Canada Valet snapshot (open data) with
+six nodes: CORRA overnight, the 1, 3, 6 and 12 month Treasury bills and the
+2 year benchmark bond. A quoted yield $y$ becomes a continuously compounded
+zero rate by
+\begin{equation}
+  r=\frac{\ln(1+y\tau)}{\tau}\ \ (\text{money market, simple yield}),\qquad
+  r=2\ln\!\bigl(1+\tfrac y2\bigr)\ \ (\text{semi-annual par yield}),
+\end{equation}
+with $\tau$ the tenor in years. Each node uses the last print on or before the
+valuation date; a missing or older-than-10-day print raises an error. $r(T)$ is
+linear in the tenor between nodes and flat beyond the end nodes. The 2 year par
+yield stands in for the zero yield, a few basis points off; bootstrapping the
+benchmark curve would be the upgrade if longer tenors mattered. The checked-in
+snapshot is the curve of 2025-01-02 (2.91--3.30\%, downward sloping); tests
+never call the Valet API.
 
 \section{Forward estimation}\label{sec:forward}
 
@@ -116,6 +141,38 @@ The price is strictly increasing in $\sigma$, so the root is unique when it
 exists. If the bracket does not contain a sign change the call also raises
 \texttt{ValueError}.
 
+\section{American exercise}\label{sec:american}
+
+\texttt{XIU} options are American-style. \texttt{american.py} prices them with a
+Cox-Ross-Rubinstein tree: with $\Delta t=T/n$, $u=e^{\sigma\sqrt{\Delta t}}$,
+$d=1/u$ and $p=\bigl(e^{(r-q)\Delta t}-d\bigr)/(u-d)$,
+\begin{equation}
+  V_{i,j}=\max\!\Bigl(\text{payoff}_{i,j},\ e^{-r\Delta t}\bigl[pV_{i+1,j+1}+(1-p)V_{i+1,j}\bigr]\Bigr).
+\end{equation}
+The reported value averages the trees with $n$ and $n+1$ steps, which damps the
+odd-even oscillation of CRR. The continuous yield is the one implied by the
+parity forward, $q=r-\ln(F/S)/T$, so the tree's forward equals $F$ exactly.
+Tests check the tree against closed-form BSM for the European case, the
+published American put value (about 6.09 for $S=K=100$, $r=5\%$,
+$\sigma=20\%$, $T=1$), $P_A\ge P_E$ and $P_A\ge$ intrinsic, and the
+McDonald-Schroder symmetry $P_A(S,K,r,q)=C_A(K,S,q,r)$.
+
+Prices are inverted by a safeguarded Newton iteration on the tree (European
+vega as the slope, bisection fallback). A price at or below intrinsic value, or
+at or above the spot (call) or strike (put), has no solution and is skipped and
+counted. Every slice also records the early-exercise premium at its fitted
+volatility and the first-order bias
+\begin{equation}
+  \text{premium}=V_A(\sigma)-V_E(\sigma),\qquad
+  \text{vol bias}\approx\frac{\text{premium}}{\mathcal V},
+\end{equation}
+the amount by which a European inversion overstates the volatility, together
+with the number of quotes whose premium exceeds half their bid-ask spread. On
+the demo, out-of-the-money quotes show at most 0.15 vol points of bias, and the
+European inversion overstates the ATM level by about 0.06 points on average.
+The continuous yield stands in for discrete quarterly dividends, which
+understates the premium of calls just before an ex-date.
+
 \section{Raw SVI calibration and arbitrage checks}\label{sec:svi}
 
 Raw SVI total variance with smoothing parameter $s$ (the code's \texttt{sigma}):
@@ -136,10 +193,13 @@ with $a$ and $m$ free, and the nonlinear inequality constraint
 \begin{equation}
   a+b\,s\sqrt{1-\rho^2}\ \ge\ 0
 \end{equation}
-(nonnegative minimum variance). The solver is
-\texttt{scipy.optimize.minimize(method="SLSQP")} with
+(nonnegative minimum variance), and Durrleman's butterfly condition
+$g(k)\ge 0$ (below) on a grid of the quoted strikes plus 201 points on
+$[\min k-0.5,\ \max k+0.5]$. Butterfly freedom is therefore a constraint of the
+fit, not a repair applied afterwards. The solver is
+\texttt{scipy.\allowbreak optimize.\allowbreak minimize} (method SLSQP) with
 \texttt{ftol}$=10^{-10}$ and at most 1000 iterations. SLSQP handles the bounds
-and the inequality together; L-BFGS-B is not used. It is run from three starting
+and the inequalities together; L-BFGS-B is not used. It is run from three starting
 points, $\rho_0\in\{-0.5,0,0.5\}$, with $a_0=\tfrac12\min w$,
 $b_0=\max(\mathrm{range}(w)/\mathrm{range}(k),10^{-3})$, $m_0=\arg\min w$ and
 $s_0=0.1$; the converged run with the lowest objective is kept. This is a local
@@ -152,10 +212,9 @@ evaluates Durrleman's function on a grid:
 \begin{equation}
   g(k)=\Bigl(1-\frac{k\,w'}{2w}\Bigr)^2-\frac{w'^2}{4}\Bigl(\frac1w+\frac14\Bigr)+\frac{w''}{2}\ \ge\ 0.
 \end{equation}
-After fitting, the grid is the input strikes plus 201 points on
-$[\min k-0.5,\ \max k+0.5]$. If any point fails, the fit raises
-\texttt{ValueError}; it is never clamped or penalized into validity. The check
-is on a finite grid, so it cannot rule out violations between points.
+After fitting, the same grid is checked again. If any point fails, the fit
+raises \texttt{ValueError}; it is never clamped or penalized into validity. The
+check is on a finite grid, so it cannot rule out violations between points.
 
 \paragraph{Calendar arbitrage.} \texttt{check\_calendar\_arbitrage} sorts slices
 by maturity, evaluates $w(k,T_j)$ on a common grid, and tests
@@ -166,16 +225,48 @@ for every pair of adjacent expiries, which is the discrete form of
 $\partial_T w(k,T)\ge 0$. It returns a boolean array and does not repair
 violations.
 
+\section{Synthetic chain}\label{sec:synthetic}
+
+The demo chain is generated, not observed. Its truth is a
+Gatheral-Jacquier SSVI surface,
+\begin{equation}
+  w(k,T)=\frac{\theta}{2}\Bigl(1+\rho\varphi k+\sqrt{(\varphi k+\rho)^2+1-\rho^2}\Bigr),\qquad
+  \theta=\sigma_{\mathrm{atm}}(T)^2T,\quad \varphi=\eta\,\theta^{-\gamma},
+\end{equation}
+which is exactly a Raw SVI slice with $a=\tfrac\theta2(1-\rho^2)$,
+$b=\tfrac{\theta\varphi}2$, $m=-\rho/\varphi$ and $s=\sqrt{1-\rho^2}/\varphi$.
+The code checks the no-arbitrage conditions $\theta$ increasing,
+$\theta\varphi(1+|\rho|)<4$, $\theta\varphi^2(1+|\rho|)\le 4$ and
+$0\le\partial_\theta(\theta\varphi)\le\frac{1+\sqrt{1-\rho^2}}{\rho^2}\varphi$ on
+$(0,3]$ years, and tests that each slice has $g\ge 0$. The ATM volatility
+rises from 11.5\% to 13.5\% (realized volatility of XIU.TO was 8.8--10.9\% in
+January 2025), with $\rho=-0.65$, $\eta=0.9$, $\gamma=0.4$: a 3-month 90\% put
+trades about 3.5 points above the ATM level.
+
+Expiries are monthly third Fridays (the Thursday before when that is Good
+Friday). Spot (37.70) and the four trailing quarterly dividends come from one
+free Yahoo history request (module \texttt{market\_params}, derived statistics
+only); the next year's dividends repeat them one year later. The forward is
+$F=(S-\mathrm{PV}(\text{dividends}))e^{rT}$ with the Bank of Canada curve.
+Each option is priced with the American tree at the truth volatility, then
+quoted with 0.01 ticks, a spread of $\max(0.02,\,0.05m)$ for mid $m$, and a
+seeded random shift of up to a quarter spread, so the chain is deterministic.
+The pipeline then recovers the truth to within 0.15 vol points at the money.
+This shows the machinery works on market-shaped quotes; it is not a market
+view.
+
 \section{Assumptions and limitations}
 
 \begin{itemize}
-  \item The CAD risk-free rate $r$ is a constant (default $3.75\%$) for all
-        expiries; there is no term structure.
-  \item Pricing is European forward BSM. Montr\'eal Exchange \texttt{XIU} ETF
-        options are American-style, so the early-exercise premium is ignored.
-        Discrete quarterly ETF dividends are not modelled explicitly; parity
-        forwards absorb them only to the extent the European approximation
-        holds.
+  \item The risk-free curve is a single snapshot (2025-01-02) with flat
+        extrapolation beyond 2 years, and the 2 year par yield stands in for
+        the zero yield. A flat rate is still available with \texttt{--rate}.
+  \item Montr\'eal Exchange \texttt{XIU} ETF options are American-style. The
+        default inversion uses the binomial tree with a continuous dividend
+        yield implied by the forward; discrete quarterly dividends (and the
+        early exercise of calls just before an ex-date) are approximated.
+        Parity forwards use American mids, a small bias that the tests
+        bound on the demo.
   \item The 0.35 relative-spread filter and the three-strike forward window are
         fixed choices, not tuned on market data.
   \item Calibration is a local multi-start and has been tested only on
