@@ -1,0 +1,185 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{tcolorbox}
+
+\newcommand{\Norm}{\Phi}
+\DeclareMathOperator{\median}{median}
+
+\title{TSX60 IV Surface: Methods as Implemented}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{System status and provenance}
+
+\begin{itemize}
+  \item \textbf{Implemented:} \texttt{data.py} (quote filtering, forwards),
+        \texttt{bsm.py} (pricing, Greeks, implied volatility),
+        \texttt{svi.py} (Raw SVI, calibration, arbitrage checks),
+        \texttt{surface.py} (the pipeline below, writing \texttt{surface.json})
+        and \texttt{api.py} (serves that file and an interactive 3D page).
+        Each has offline tests.
+  \item \textbf{Optional:} \texttt{tracking.py} (an MLflow logging call) runs
+        only with the \texttt{--mlflow} flag and is not covered by tests.
+  \item \textbf{Data:} Yahoo Finance returns no options for \texttt{XIU.TO}, so
+        there is no live XIU source yet. Every result here comes from a
+        \emph{synthetic} chain (\texttt{synthetic.py}, also the source of the
+        offline test fixture
+        \texttt{tests/fixtures/\allowbreak xiu\_\allowbreak sample\_\allowbreak chain.parquet}).
+        It contains no market quotes, and the page labels it as a synthetic
+        demo. A live download for a Yahoo-listed ticker happens only with an
+        explicit \texttt{--fetch}, at one request per expiry.
+\end{itemize}
+
+\section{Algorithm}
+
+\begin{tcolorbox}[title=Pipeline from quotes to a validated slice]
+\begin{enumerate}
+  \item Filter quotes: keep $b>0$, $a\ge b$, mid $m=(a+b)/2$ finite and
+        $(a-b)/m\le 0.35$.
+  \item Set $T=\mathrm{days}(t_{\mathrm{exp}}-t_0)/365$ and $D(T)=e^{-rT}$;
+        drop expiries with $T\le 0$.
+  \item Estimate $F(T)$ by put-call parity (Section~\ref{sec:forward}); drop
+        expiries with no call/put pair.
+  \item Compute $k=\ln(K/F(T))$; keep out-of-the-money quotes (puts for
+        $K<F$, calls for $K\ge F$) with mid $\ge 0.05$.
+  \item Invert each mid to $\sigma$ with Brent's method, one row at a time
+        (Section~\ref{sec:iv}); count and skip rows that fail; set
+        $w=\sigma^2T$.
+  \item Fit Raw SVI per expiry (at least 5 points) by constrained multi-start
+        SLSQP (Section~\ref{sec:svi}); list the expiry as rejected if the fit
+        fails or has butterfly arbitrage.
+  \item Check $\partial_T w(k,T)\ge 0$ across adjacent expiries.
+\end{enumerate}
+\end{tcolorbox}
+
+\texttt{surface.py} runs these steps and reports, but never repairs, skipped
+quotes, rejected expiries and a failed calendar check. The 3D mesh shows the
+fitted expiries plus six rows between each pair, where total variance is
+linear in $T$ at fixed $k$ (this preserves calendar monotonicity). Cells
+outside the quoted strikes of the neighbouring expiries are left empty, not
+extrapolated.
+
+\section{Forward estimation}\label{sec:forward}
+
+Put-call parity for European options is $C-P=D(T)\,(F(T)-K)$. For each strike
+$K_i$ with both a call and a put at the same expiry,
+\begin{equation}
+  \hat F_i = K_i + e^{rT}\,(C_i-P_i),
+\end{equation}
+using mid prices. For each expiry take the three pairs with smallest
+$|K_i-S|$, where $S$ is spot, and set
+\begin{equation}
+  F(T)=\median\{\hat F_i : i\in\text{3 nearest-ATM pairs}\}.
+\end{equation}
+Spot only selects the strikes. There is no spot-based fallback: an expiry
+without a pair is dropped, and a chain with no pairs raises an error.
+
+\section{Forward-space pricing and Greeks}
+
+With $\sqrt v=\sigma\sqrt T$,
+\begin{equation}
+  d_1=\frac{\ln(F/K)}{\sqrt v}+\tfrac12\sqrt v,\qquad d_2=d_1-\sqrt v,
+\end{equation}
+\begin{equation}
+  C=D\,[F\,\Norm(d_1)-K\,\Norm(d_2)],\qquad
+  P=D\,[K\,\Norm(-d_2)-F\,\Norm(-d_1)].
+\end{equation}
+Let $\varphi$ be the standard normal density. All derivatives are with respect
+to the forward $F$ (not spot) and include $D(T)=e^{-rT}$:
+\begin{align}
+  \Delta_C&=D\,\Norm(d_1), & \Delta_P&=D\,[\Norm(d_1)-1],\\
+  \Gamma&=\frac{D\,\varphi(d_1)}{F\sigma\sqrt T}, &
+  \mathcal V&=\frac{\partial C}{\partial\sigma}=D\,F\,\varphi(d_1)\sqrt T,\\
+  \text{vanna}&=\frac{\partial\Delta}{\partial\sigma}=-\frac{D\,\varphi(d_1)\,d_2}{\sigma}, &
+  \text{volga}&=\frac{\partial\mathcal V}{\partial\sigma}=\frac{\mathcal V\,d_1d_2}{\sigma}.
+\end{align}
+Vega is per unit volatility ($\Delta\sigma=1.0$). A one-point move in
+volatility ($\Delta\sigma=0.01$) changes the price by $0.01\,\mathcal V$, so the
+reported vega is $100\times$ the per-point figure. Volga is likewise per unit
+volatility. At $\sigma=0$ the price is the discounted intrinsic value, and the
+Greeks raise an error.
+
+\section{Implied volatility}\label{sec:iv}
+
+A price is accepted only if it is strictly inside the static bounds
+\begin{equation}
+  D\max(F-K,0)<C<DF,\qquad D\max(K-F,0)<P<DK.
+\end{equation}
+Otherwise \texttt{implied\_volatility} raises \texttt{ValueError}; there is no
+heuristic fallback. The root of $\mathrm{BSM}(\sigma)-m=0$ is found with
+\texttt{scipy.optimize.brentq} on $[10^{-5},5]$ using its default tolerances.
+The price is strictly increasing in $\sigma$, so the root is unique when it
+exists. If the bracket does not contain a sign change the call also raises
+\texttt{ValueError}.
+
+\section{Raw SVI calibration and arbitrage checks}\label{sec:svi}
+
+Raw SVI total variance with smoothing parameter $s$ (the code's \texttt{sigma}):
+\begin{equation}
+  w(k)=a+b\Bigl[\rho(k-m)+\sqrt{(k-m)^2+s^2}\Bigr].
+\end{equation}
+
+\paragraph{Fit.} For one expiry with points $(k_i,w_i)$, \texttt{calibrate\_svi\_slice}
+solves
+\begin{equation}
+  \min_{a,b,\rho,m,s}\ \frac{1}{\bar w^{2}}\sum_i\bigl(w(k_i)-w_i\bigr)^2
+\end{equation}
+subject to the box bounds
+\begin{equation}
+  b\ge 0,\qquad -1+10^{-6}\le\rho\le 1-10^{-6},\qquad s\ge 10^{-6},
+\end{equation}
+with $a$ and $m$ free, and the nonlinear inequality constraint
+\begin{equation}
+  a+b\,s\sqrt{1-\rho^2}\ \ge\ 0
+\end{equation}
+(nonnegative minimum variance). The solver is
+\texttt{scipy.optimize.minimize(method="SLSQP")} with
+\texttt{ftol}$=10^{-10}$ and at most 1000 iterations. SLSQP handles the bounds
+and the inequality together; L-BFGS-B is not used. It is run from three starting
+points, $\rho_0\in\{-0.5,0,0.5\}$, with $a_0=\tfrac12\min w$,
+$b_0=\max(\mathrm{range}(w)/\mathrm{range}(k),10^{-3})$, $m_0=\arg\min w$ and
+$s_0=0.1$; the converged run with the lowest objective is kept. This is a local
+multi-start, not a global optimizer. If no run converges the function raises
+\texttt{ValueError}.
+
+\paragraph{Butterfly arbitrage.} With $y=k-m$, $R=\sqrt{y^2+s^2}$,
+$w'=b(\rho+y/R)$ and $w''=bs^2/R^3$, \texttt{check\_butterfly\_arbitrage}
+evaluates Durrleman's function on a grid:
+\begin{equation}
+  g(k)=\Bigl(1-\frac{k\,w'}{2w}\Bigr)^2-\frac{w'^2}{4}\Bigl(\frac1w+\frac14\Bigr)+\frac{w''}{2}\ \ge\ 0.
+\end{equation}
+After fitting, the grid is the input strikes plus 201 points on
+$[\min k-0.5,\ \max k+0.5]$. If any point fails, the fit raises
+\texttt{ValueError}; it is never clamped or penalized into validity. The check
+is on a finite grid, so it cannot rule out violations between points.
+
+\paragraph{Calendar arbitrage.} \texttt{check\_calendar\_arbitrage} sorts slices
+by maturity, evaluates $w(k,T_j)$ on a common grid, and tests
+\begin{equation}
+  w(k,T_{j+1})-w(k,T_j)\ \ge\ 0
+\end{equation}
+for every pair of adjacent expiries, which is the discrete form of
+$\partial_T w(k,T)\ge 0$. It returns a boolean array and does not repair
+violations.
+
+\section{Assumptions and limitations}
+
+\begin{itemize}
+  \item The CAD risk-free rate $r$ is a constant (default $3.75\%$) for all
+        expiries; there is no term structure.
+  \item Pricing is European forward BSM. Montr\'eal Exchange \texttt{XIU} ETF
+        options are American-style, so the early-exercise premium is ignored.
+        Discrete quarterly ETF dividends are not modelled explicitly; parity
+        forwards absorb them only to the extent the European approximation
+        holds.
+  \item The 0.35 relative-spread filter and the three-strike forward window are
+        fixed choices, not tuned on market data.
+  \item Calibration is a local multi-start and has been tested only on
+        synthetic smiles.
+\end{itemize}
+
+\end{document}

@@ -1,10 +1,14 @@
 """Tests for option quote filtering and forward estimation."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
+from yfinance.exceptions import YFRateLimitError
 
+from tsx60_iv import data
 from tsx60_iv.data import _filter_quoted_chain, estimate_forward_and_rates
 
 FIXTURE = Path(__file__).parent / "fixtures" / "xiu_sample_chain.parquet"
@@ -59,3 +63,103 @@ def test_forward_estimation_preserves_put_call_parity() -> None:
         - pairs["discount_call"] * (pairs["forward_call"] - pairs["strike"])
     )
     assert abs(residual).max() < 0.04
+
+
+def test_forward_comes_from_parity_not_spot() -> None:
+    """A wrong spot must not move the parity-estimated forward."""
+    chain = pd.read_parquet(FIXTURE)
+    enriched = estimate_forward_and_rates(chain, spot=36.0)
+    expected = 38.50 * np.exp(0.0375 * enriched["time_to_expiry"])
+    assert np.max(np.abs(enriched["forward"] - expected)) < 1e-9
+
+
+def test_expiry_on_as_of_is_dropped() -> None:
+    """An expiry on its last day is excluded instead of failing the chain."""
+    chain = pd.read_parquet(FIXTURE)
+    chain["expiration"] = pd.to_datetime(chain["expiration"])
+    first = chain["expiration"].min()
+    chain.loc[chain["expiration"] == first, "expiration"] = pd.Timestamp(
+        chain["as_of"].iloc[0]
+    ).normalize()
+    result = estimate_forward_and_rates(chain, spot=38.50)
+    assert result["expiration"].nunique() == 3
+    assert (result["time_to_expiry"] > 0).all()
+
+
+def test_calls_only_chain_raises() -> None:
+    """Without call/put pairs no forward is guessed."""
+    chain = pd.read_parquet(FIXTURE)
+    calls = chain.loc[chain["option_type"] == "call"]
+    with pytest.raises(ValueError, match="no call/put pairs"):
+        estimate_forward_and_rates(calls, spot=38.50)
+
+
+class _FakeTicker:
+    """Offline stand-in for ``yf.Ticker`` that counts requests."""
+
+    requests = 0
+    fail_after: int | None = None
+    options = ("2025-02-21", "2025-03-21", "2025-04-17", "2025-05-16")
+
+    def __init__(self, _symbol: str) -> None:
+        pass
+
+    def option_chain(self, date: str | None = None) -> SimpleNamespace:
+        cls = type(self)
+        cls.requests += 1
+        if cls.fail_after is not None and cls.requests > cls.fail_after:
+            raise YFRateLimitError()
+        quotes = pd.DataFrame({"strike": [38.0], "bid": [1.0], "ask": [1.1]})
+        return SimpleNamespace(
+            calls=quotes, puts=quotes, underlying={"regularMarketPrice": 38.5}
+        )
+
+
+@pytest.fixture
+def fake_yahoo(monkeypatch: pytest.MonkeyPatch) -> type[_FakeTicker]:
+    """Patch yfinance and the pause so fetch tests are offline and instant."""
+    _FakeTicker.requests, _FakeTicker.fail_after = 0, None
+    monkeypatch.setattr(data.yf, "Ticker", _FakeTicker)
+    monkeypatch.setattr(data.time, "sleep", lambda _s: None)
+    return _FakeTicker
+
+
+def test_fetch_makes_one_request_per_expiry_and_stores_spot(
+    fake_yahoo: type[_FakeTicker], tmp_path: Path
+) -> None:
+    """Requests equal the capped expiry count; spot and as_of are cached."""
+    result = data.fetch_xiu_chain("X", tmp_path / "c.parquet", max_expiries=3)
+    assert fake_yahoo.requests == 3
+    assert result["expiration"].nunique() == 3
+    assert (result["spot"] == 38.5).all() and "as_of" in result
+    assert (tmp_path / "c.parquet").exists()
+
+
+def test_fetch_stops_on_rate_limit_and_writes_nothing(
+    fake_yahoo: type[_FakeTicker], tmp_path: Path
+) -> None:
+    """A rate-limit error is not retried and leaves no cache file."""
+    fake_yahoo.fail_after = 2
+    with pytest.raises(YFRateLimitError):
+        data.fetch_xiu_chain("X", tmp_path / "c.parquet")
+    assert fake_yahoo.requests == 3
+    assert not (tmp_path / "c.parquet").exists()
+
+
+def test_fetch_empty_chain_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A ticker Yahoo has no options for raises instead of caching nothing."""
+
+    class Empty:
+        options: tuple[str, ...] = ()
+
+        def __init__(self, _symbol: str) -> None:
+            pass
+
+        def option_chain(self, date: str | None = None) -> SimpleNamespace:
+            return SimpleNamespace(calls=None, puts=None, underlying=None)
+
+    monkeypatch.setattr(data.yf, "Ticker", Empty)
+    with pytest.raises(ValueError, match="no options"):
+        data.fetch_xiu_chain("XIU.TO", tmp_path / "c.parquet")

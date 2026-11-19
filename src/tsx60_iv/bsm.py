@@ -17,8 +17,11 @@ def _inputs(
     time_to_expiry: ArrayLike,
     discount: ArrayLike,
     volatility: ArrayLike,
+    option_type: str,
 ) -> tuple[FloatArray, ...]:
     """Broadcast and validate BSM inputs."""
+    if option_type not in ("call", "put"):
+        raise ValueError("option_type must be 'call' or 'put'")
     values = np.broadcast_arrays(
         *(
             np.asarray(value, dtype=float)
@@ -31,6 +34,8 @@ def _inputs(
             )
         )
     )
+    if not all(np.all(np.isfinite(v)) for v in values):
+        raise ValueError("BSM inputs must be finite")
     forward_array, strike_array, time_array, discount_array, vol_array = values
     if np.any(forward_array <= 0) or np.any(strike_array <= 0):
         raise ValueError("forward and strike must be positive")
@@ -72,10 +77,8 @@ def bsm_price(
         Option prices, broadcast to the input shape.
     """
     f, k, time, disc, vol = _inputs(
-        forward, strike, time_to_expiry, discount, volatility
+        forward, strike, time_to_expiry, discount, volatility, option_type
     )
-    if option_type not in ("call", "put"):
-        raise ValueError("option_type must be 'call' or 'put'")
     with np.errstate(divide="ignore", invalid="ignore"):
         sqrt_variance = vol * np.sqrt(time)
         d1 = np.log(f / k) / sqrt_variance + 0.5 * sqrt_variance
@@ -105,10 +108,8 @@ def bsm_greeks(
     percentage point.
     """
     f, k, time, disc, vol = _inputs(
-        forward, strike, time_to_expiry, discount, volatility
+        forward, strike, time_to_expiry, discount, volatility, option_type
     )
-    if option_type not in ("call", "put"):
-        raise ValueError("option_type must be 'call' or 'put'")
     if np.any(vol == 0):
         raise ValueError("Greeks are undefined at zero volatility")
     root_t = np.sqrt(time)
@@ -160,10 +161,7 @@ def implied_volatility(
             )
         )
     )
-    if option_type not in ("call", "put"):
-        raise ValueError("option_type must be 'call' or 'put'")
-    if np.any(f <= 0) or np.any(k <= 0) or np.any(time <= 0) or np.any(disc <= 0):
-        raise ValueError("forward, strike, time and discount must be valid")
+    f, k, time, disc, _ = _inputs(f, k, time, disc, 0.0, option_type)
     intrinsic = disc * (
         np.maximum(f - k, 0.0) if option_type == "call" else np.maximum(k - f, 0.0)
     )
