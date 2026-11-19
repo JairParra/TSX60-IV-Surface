@@ -2,9 +2,11 @@
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath,amssymb}
 \usepackage{tcolorbox}
+\usepackage{array}
 
 \newcommand{\Norm}{\Phi}
 \DeclareMathOperator{\median}{median}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 
 \title{TSX60 IV Surface: Methods as Implemented}
 \author{}
@@ -35,9 +37,58 @@
         It contains no market quotes, though its inputs are real: the Bank of
         Canada curve of 2025-01-02 and XIU.TO's closing spot, realized
         volatility and dividends (Section~\ref{sec:synthetic}). The page labels
-        the surface a synthetic demo. A live download for a Yahoo-listed ticker happens only with an
-        explicit \texttt{--fetch}, at one request per expiry.
+        the surface a synthetic demo. A live download for a Yahoo-listed ticker
+        happens only with an explicit \texttt{--fetch}, at one request per
+        expiry.
+  \item \textbf{Companion documents:} \texttt{README.md} (quick start and a
+        shorter statement of the mathematics), \texttt{docs/README.md}
+        (architecture and function reference) and \texttt{docs/PROGRESS.md}
+        (development log).
 \end{itemize}
+
+\section{Running the project}\label{sec:running}
+
+Commands are run from the repository root with \texttt{uv}.
+
+\begin{center}\small
+\begin{tabular}{|L{4.1cm}|L{10.6cm}|}
+\hline
+Task & Command \\ \hline
+Install & \texttt{uv sync} \\ \hline
+Build the surface & \texttt{uv run python -m tsx60\_iv.surface --demo} \\ \hline
+Serve the page & \texttt{uv run uvicorn tsx60\_iv.api:app --port 8000}, then open
+\texttt{http://127.0.0.1:8000/} \\ \hline
+Rerun the simulation & the build command again; the page re-checks the file every
+30\,s, so no restart is needed \\ \hline
+Tests and lint & \texttt{uv run pytest} and \texttt{uv run ruff check .} \\ \hline
+Rebuild this PDF & \texttt{tectonic docs/tsx60\_iv\_whitepaper.tex} \\ \hline
+Refresh the rate curve & \texttt{uv run python -m tsx60\_iv.rates --as-of DATE
+--out PATH} (one Valet request) \\ \hline
+Refresh the market anchors & \texttt{uv run python -m tsx60\_iv.market\_params
+--as-of DATE --out PATH} (one Yahoo request) \\ \hline
+\end{tabular}
+\end{center}
+
+The surface builder takes the following flags.
+
+\begin{center}\small
+\begin{tabular}{|L{4.1cm}|L{3.2cm}|L{7.2cm}|}
+\hline
+Flag & Default & Meaning \\ \hline
+\texttt{--demo} & off & generated chain and bundled Bank of Canada snapshot \\ \hline
+\texttt{--exercise} & \texttt{american} & \texttt{european} or \texttt{american}
+(Section~\ref{sec:choice}) \\ \hline
+\texttt{--dividends} & \texttt{schedule} with \texttt{--demo}, else
+\texttt{continuous} & dividend model of the tree; \texttt{schedule} needs
+\texttt{--demo} \\ \hline
+\texttt{--curve}, \texttt{--rate} & bundled curve in the demo, else 3.75\% &
+curve snapshot or flat rate (not both) \\ \hline
+\texttt{--min-mid} & 0.05 & drop quotes with a smaller mid (five ticks) \\ \hline
+\texttt{--out} & \texttt{data/surface.json} & output file, written atomically \\ \hline
+\texttt{--fetch}, \texttt{--force} & off & explicit live download; 30-minute
+cooldown unless forced \\ \hline
+\end{tabular}
+\end{center}
 
 \section{Algorithm}
 
@@ -62,6 +113,25 @@
   \item Check $\partial_T w(k,T)\ge 0$ across adjacent expiries.
 \end{enumerate}
 \end{tcolorbox}
+
+Which module does what:
+
+\begin{center}\small
+\begin{tabular}{|L{3.3cm}|L{11.4cm}|}
+\hline
+Module & Role \\ \hline
+\texttt{data.py} & quote filter, per-expiry rate, parity forward (with an optional
+mid adjustment) \\ \hline
+\texttt{rates.py} & Bank of Canada curve, bootstrap, JSON snapshots \\ \hline
+\texttt{bsm.py} & forward BSM price, Greeks, Brent inversion (European) \\ \hline
+\texttt{american.py} & CRR tree, discrete dividends, Newton inversion,
+early-exercise premium \\ \hline
+\texttt{svi.py} & raw SVI, constrained fit, butterfly and calendar checks \\ \hline
+\texttt{surface.py} & the pipeline, mesh, JSON writer and command line \\ \hline
+\texttt{synthetic.py} & legacy test chain and the realistic SSVI demo chain \\ \hline
+\texttt{api.py}, \texttt{static/} & the file-backed API and the 3D page \\ \hline
+\end{tabular}
+\end{center}
 
 \texttt{surface.py} runs these steps and reports, but never repairs, skipped
 quotes, rejected expiries and a failed calendar check. The 3D mesh shows the
@@ -198,6 +268,99 @@ error of $+0.003$ vol points (largest 0.07), where a European inversion of the
 same quotes overstates ATM vol by 0.27 points on average and up to 0.74. The
 exercise premium of out-of-the-money quotes is at most 0.5 vol points except for
 the two expiries that fall on or next to an ex-date (about 1.9 and 1.0).
+
+\section{Choosing the exercise and dividend model}\label{sec:choice}
+
+Two switches control how mids become volatilities. \texttt{--exercise} picks the
+pricing model and \texttt{--dividends} picks how the American tree realises
+dividends.
+
+\begin{center}\small
+\begin{tabular}{|L{3.3cm}|L{5.5cm}|L{5.7cm}|}
+\hline
+ & \texttt{european} & \texttt{american} (default) \\ \hline
+Price & closed-form forward BSM & CRR tree with the right to exercise early \\ \hline
+Module and solver & \texttt{bsm.py}, Brent, one quote at a time &
+\texttt{american.py}, safeguarded Newton, vectorized per expiry and side \\ \hline
+Forward & raw put-call parity & parity corrected for early exercise (3 passes) \\ \hline
+Extra inputs & none & implied yield $q$, optionally a dividend schedule \\ \hline
+Demo run time & about 5\,s & about 10\,s \\ \hline
+Mean ATM error vs truth & $+0.27$ vol points (worst 0.74) & $+0.003$ (worst
+0.07) \\ \hline
+\end{tabular}
+\end{center}
+
+An American option is worth at least a European one,
+$V_A(\sigma)=V_E(\sigma)+\text{premium}$, so a European inversion of American
+quotes overstates the volatility by about $\text{premium}/\mathcal V$, and
+parity, a European identity, biases the forward as well. \texttt{american} is the
+default because \texttt{XIU} options are American-style. \texttt{european} is kept
+for speed and as the baseline that shows how much early exercise matters; both
+modes record the premium and bias of every slice.
+
+\begin{center}\small
+\begin{tabular}{|L{3.3cm}|L{5.5cm}|L{5.7cm}|}
+\hline
+ & \texttt{schedule} & \texttt{continuous} \\ \hline
+Dividends & discrete cash payments at known dates & a smooth yield $q$ over the life \\ \hline
+Exercise valued on & $S^*+\mathrm{PV}_t$ & $S$ \\ \hline
+Call before an ex-date & worth most & understated \\ \hline
+Default & the demo & any run without a schedule \\ \hline
+\end{tabular}
+\end{center}
+
+The demo's generating process pays discrete dividends, so the schedule recovers
+the truth and the continuous yield overstates ATM volatility; a test asserts
+that the schedule's mean ATM error is less than half of the continuous one's.
+
+\section{Output and diagnostics}\label{sec:output}
+
+The pipeline writes one JSON document (schema version 2) to
+\texttt{data/surface.json}. It contains \texttt{meta} (source, synthetic flag,
+exercise and dividend model, the rate curve and the counts of skipped quotes),
+\texttt{calendar} (pass, fail or not checked, with the violating pairs),
+\texttt{rejected} (expiry and reason), one entry per fitted expiry and the
+\texttt{grid} of the 3D mesh. Each fitted expiry carries its SVI parameters, the
+RMSE in vol points, the zero rate, the implied dividend yield, the
+early-exercise bias (maximum, median, and the number of quotes whose premium
+exceeds half their spread), the observed quotes with their bid and ask, and the
+smile, total-variance and Durrleman $g$ grids. Non-finite numbers are written as
+\texttt{null}, and the file is replaced atomically so the API never reads a
+partial file.
+
+Skipped quotes are counted in three classes: below the mid floor, outside the
+arbitrage bounds, and without a root in the solver bracket. The page shows these
+counts, the rejected expiries with their reasons, and the pass or fail of the
+three checks (minimum variance, butterfly, calendar) for the selected expiry.
+
+\section{Validation and results}\label{sec:results}
+
+All tests are offline and deterministic. They cover, among others: the BSM
+Greeks against finite differences; the tree against closed-form BSM, a published
+American put, dominance of the American price, put-call symmetry and the effect
+of discrete dividends; the rate curve (conversion, bootstrap on flat and sloped
+curves, stale or missing prints, a mocked single Valet request); the SSVI
+conditions and the exact raw-SVI form of each slice; the generated chain
+(determinism, ticks, spreads, expiry dates, Good Friday); the parity forward
+correction; and the whole pipeline against the generating surface.
+
+Measured on the demo against the generating surface (12 of 13 expiries fit; the
+15-day expiry has too few usable quotes and is listed as rejected):
+
+\begin{center}\small
+\begin{tabular}{|L{6.3cm}|L{2.7cm}|L{2.7cm}|L{2.7cm}|}
+\hline
+Setting & Mean ATM error & Worst ATM error & Worst quote error \\ \hline
+American, schedule, corrected forward (default) & $+0.003$ & 0.07 & 0.31 \\ \hline
+European & $+0.27$ & 0.74 & 1.05 \\ \hline
+\end{tabular}
+\end{center}
+
+(all in volatility points). The forward error on the expiry that falls on an
+ex-date is 0.33\% of $F$ before the early-exercise correction and about 0.01\%
+after it. The ex-date expiry has only 8 quotes and its SVI fit is fragile: on
+some platforms the optimizer rejects it, and the pipeline reports it instead of
+repairing it.
 
 \section{Raw SVI calibration and arbitrage checks}\label{sec:svi}
 
