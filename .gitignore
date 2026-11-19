@@ -228,3 +228,6 @@ __marimo__/
 
 # Generated pipeline outputs
 data/
+
+# Vendored third-party Claude skills (restore with skills-lock.json)
+.claude/skills/
