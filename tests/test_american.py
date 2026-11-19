@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from tsx60_iv.american import (
+    Dividends,
     american_implied_volatility,
     american_implied_vols,
     american_price,
@@ -148,3 +149,68 @@ def test_bias_accepts_arrays_for_one_expiry() -> None:
             ivs[i], 37.7, forward, strikes[i], 0.5, 0.03, "put"
         )
         assert premium[i] == pytest.approx(p_i) and bias[i] == pytest.approx(b_i)
+
+
+def test_dividends_validate_and_discount() -> None:
+    """PV counts payments strictly after `at` and up to `until`."""
+    divs = Dividends((0.1, 0.4, 0.9), (0.25, 0.25, 0.25))
+    assert divs.pv(0.0, 0.0, 0.5) == pytest.approx(0.5)
+    assert divs.pv(0.1, 0.0, 1.0) == pytest.approx(0.5)  # 0.1 itself is paid
+    assert divs.pv(0.0, 0.05, 0.5) == pytest.approx(
+        0.25 * (np.exp(-0.005) + np.exp(-0.02))
+    )
+    with pytest.raises(ValueError):
+        Dividends((0.1,), (0.2, 0.3))
+    with pytest.raises(ValueError):
+        Dividends((-0.1,), (0.2,))
+
+
+def _consistent_q(spot: float, divs: Dividends, time: float, rate: float) -> float:
+    """Yield that reproduces the forward (S - PV(dividends)) * exp(rT)."""
+    forward = (spot - divs.pv(0.0, rate, time)) * np.exp(rate * time)
+    return implied_dividend_yield(spot, forward, time, rate)
+
+
+def test_discrete_and_continuous_dividends_share_the_european_price() -> None:
+    """Both anchor to the same forward, so only the exercise value differs."""
+    divs = Dividends((0.2,), (0.4,))
+    q = _consistent_q(37.7, divs, 0.5, 0.03)
+    args = (37.7, 37.7, 0.5, 0.03, q, 0.15, "call")
+    exact = _bsm(*args)
+    # Different trees (S vs S*) discretise differently, but both converge to BSM.
+    assert european_tree_price(*args, dividends=divs) == pytest.approx(exact, abs=2e-3)
+    assert european_tree_price(*args) == pytest.approx(exact, abs=2e-3)
+
+
+def test_call_before_an_ex_date_is_worth_more_with_discrete_dividends() -> None:
+    """A continuous yield spreads the dividend and understates the call premium."""
+    divs = Dividends((0.3,), (1.0,))  # large payment shortly before expiry
+    q = _consistent_q(37.7, divs, 0.31, 0.03)
+    args = (37.7, 36.0, 0.31, 0.03, q, 0.15, "call")
+    discrete = american_price(*args, dividends=divs)
+    continuous = american_price(*args)
+    european = european_tree_price(*args)
+    assert discrete > continuous >= european - 1e-12
+    assert discrete - european > 0.05  # exercising just before the ex-date pays
+
+
+def test_schedule_after_expiry_or_inconsistent_falls_back_to_continuous() -> None:
+    """No dividend before expiry, or a schedule 3x off the forward, is ignored."""
+    args = (37.7, 36.0, 0.5, 0.03, 0.02, 0.15, "call")
+    assert american_price(*args, dividends=Dividends((0.9,), (0.3,))) == american_price(
+        *args
+    )
+    inconsistent = Dividends((0.2,), (0.01,))  # PV 0.01 versus implied S(1-e^-qT)
+    assert american_price(*args, dividends=inconsistent) == american_price(*args)
+
+
+def test_inversion_with_dividends_round_trips() -> None:
+    """Prices from the discrete tree invert back to the volatility that made them."""
+    divs = Dividends((0.2, 0.45), (0.3, 0.3))
+    q = _consistent_q(37.7, divs, 0.5, 0.03)
+    strikes = np.array([35.0, 37.7, 40.0])
+    prices = american_price(37.7, strikes, 0.5, 0.03, q, 0.16, "call", dividends=divs)
+    vols = american_implied_vols(
+        prices, 37.7, strikes, 0.5, 0.03, q, "call", dividends=divs
+    )
+    assert vols == pytest.approx([0.16, 0.16, 0.16], abs=1e-7)

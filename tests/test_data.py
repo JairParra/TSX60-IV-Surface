@@ -179,3 +179,16 @@ def test_rate_curve_gives_each_expiry_its_own_rate() -> None:
     )
     flat = estimate_forward_and_rates(chain, spot=38.50, r_cad=0.03)
     assert (flat["rate"] == 0.03).all()
+
+
+def test_mid_adjustment_shifts_the_parity_forward_only() -> None:
+    """Lowering call mids by d lowers each parity forward by d / D, mids untouched."""
+    chain = pd.read_parquet(FIXTURE)
+    base = estimate_forward_and_rates(chain, spot=38.50)
+    calls = base["option_type"] == "call"
+    adjusted = estimate_forward_and_rates(
+        chain, spot=38.50, mid_adjustment=pd.Series(np.where(calls, 0.10, 0.0))
+    )
+    assert np.allclose(adjusted["mid"], base["mid"])
+    shift = base["forward"] - adjusted["forward"]
+    assert np.allclose(shift, 0.10 / base["discount"], atol=1e-9)

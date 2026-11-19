@@ -127,7 +127,10 @@ contacts Yahoo.
 
 Useful flags: `--exercise european|american` (default `american`, the right
 model for XIU options; `european` shows the bias of ignoring early exercise),
-`--curve PATH` or `--rate 0.03` to change the discount curve.
+`--dividends schedule|continuous` (the demo defaults to its expected dividend
+schedule; `continuous` shows what a flat yield costs), `--curve PATH` or
+`--rate 0.03` to change the discount curve, and `--min-mid` (default 0.05, five
+ticks) for the quote floor.
 
 The two data anchors are checked-in snapshots under `src/tsx60_iv/data_files/`.
 Regenerating them is an explicit, free, one-request-each network call:

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.optimize import brentq
 
 VALET_URL = "https://www.bankofcanada.ca/valet/observations/{series}/json"
 TERMS_URL = "https://www.bankofcanada.ca/terms/"
@@ -39,6 +40,7 @@ class RateCurve:
     zero_rates: tuple[float, ...]
     source: str
     observation_dates: tuple[str, ...] = ()
+    quoted_yields_pct: tuple[float, ...] = ()  # raw prints, for audit
 
     def __post_init__(self) -> None:
         """Validate the nodes."""
@@ -75,23 +77,50 @@ class RateCurve:
             tuple(raw["zero_rates"]),
             raw["source"],
             tuple(raw.get("observation_dates", ())),
+            tuple(raw.get("quoted_yields_pct", ())),
         )
 
 
 def to_zero_rate(percent_yield: float, tenor: float, convention: str) -> float:
-    """Convert a quoted yield in percent to a continuously compounded rate.
+    """Convert a quoted money-market yield in percent to a continuous rate.
 
-    ``money``: simple annualized yield, ``DF = 1 / (1 + y * tenor)``.
-    ``par``: semi-annual coupon par yield, treated as a zero yield.
-    # shortcut: par yield stands in for the zero yield at 2y (a few bp off);
-    # bootstrap the benchmark curve if longer tenors are needed.
+    ``money``: simple annualized yield, ``DF = 1 / (1 + y * tenor)``. Par yields
+    need the shorter nodes and go through ``bootstrap_par_zero``.
     """
-    y = percent_yield / 100.0
-    if convention == "money":
-        return float(np.log1p(y * tenor) / tenor)
-    if convention == "par":
-        return float(2.0 * np.log1p(y / 2.0))
-    raise ValueError(f"unknown convention {convention!r}")
+    if convention != "money":
+        raise ValueError(f"unknown convention {convention!r}")
+    return float(np.log1p(percent_yield / 100.0 * tenor) / tenor)
+
+
+def bootstrap_par_zero(
+    percent_par: float,
+    maturity: float,
+    known_tenors: tuple[float, ...],
+    known_rates: tuple[float, ...],
+) -> float:
+    """Zero rate at ``maturity`` that prices a semi-annual par bond at par.
+
+    Coupon dates every half year; their zero rates come from the known nodes
+    (linear, flat before the first), and rates between the last known tenor
+    and ``maturity`` are linear in tenor toward the unknown rate.
+    """
+    coupon = percent_par / 100.0 / 2.0
+    dates = np.arange(0.5, maturity + 1e-9, 0.5)
+    last = known_tenors[-1]
+
+    def zero_at(t: float, rate: float) -> float:
+        if t <= last:
+            return float(np.interp(t, known_tenors, known_rates))
+        return known_rates[-1] + (rate - known_rates[-1]) * (t - last) / (
+            maturity - last
+        )
+
+    def pricing_gap(rate: float) -> float:
+        value = sum(coupon * np.exp(-zero_at(t, rate) * t) for t in dates[:-1])
+        value += (1.0 + coupon) * np.exp(-rate * maturity)
+        return float(value - 1.0)
+
+    return float(brentq(pricing_gap, -0.05, 0.25))
 
 
 def curve_from_observations(
@@ -100,6 +129,7 @@ def curve_from_observations(
     """Build a curve from Valet rows, using the last print on or before ``as_of``."""
     rates: list[float] = []
     stamps: list[str] = []
+    quoted: list[float] = []
     for series, label, tenor, convention in NODES:
         rows = [
             (row["d"], row[series]["v"])
@@ -111,14 +141,20 @@ def curve_from_observations(
         stamp, value = max(rows)
         if (as_of - date.fromisoformat(stamp)).days > MAX_STALENESS_DAYS:
             raise ValueError(f"{label} observation {stamp} is too old for {as_of}")
-        rates.append(to_zero_rate(float(value), tenor, convention))
+        if convention == "par":
+            known = tuple(node[2] for node in NODES[: len(rates)])
+            rates.append(bootstrap_par_zero(float(value), tenor, known, tuple(rates)))
+        else:
+            rates.append(to_zero_rate(float(value), tenor, convention))
         stamps.append(stamp)
+        quoted.append(float(value))
     return RateCurve(
         as_of.isoformat(),
         tuple(node[2] for node in NODES),
         tuple(rates),
         "Bank of Canada Valet API",
         tuple(stamps),
+        tuple(quoted),
     )
 
 

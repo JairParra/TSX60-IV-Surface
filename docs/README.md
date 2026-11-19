@@ -115,7 +115,8 @@ The lifecycle of data through the repository progresses through 8 stages:
 2. **Quote Quality Filtering**:
    - `_filter_quoted_chain()` retains only quotes where $bid > 0$, $ask \ge bid$, mid price $m = (bid + ask) / 2$ is finite, and relative bid-ask spread $(ask - bid) / m \le 0.35$.
 3. **Discounting & Forward Estimation**:
-   - `estimate_forward_and_rates()` calculates $T = \text{days} / 365$ and $D(T) = e^{-r(T)\,T}$, where $r(T)$ is the continuously compounded zero rate read from the Bank of Canada curve (`rates.RateCurve`, linear between nodes, flat beyond them) or a flat float.
+   - `estimate_forward_and_rates()` calculates $T = \text{days} / 365$ and $D(T) = e^{-r(T)\,T}$, where $r(T)$ is the continuously compounded zero rate read from the Bank of Canada curve (`rates.RateCurve`, linear between nodes, flat beyond them) or a flat float. The 2-year par yield is bootstrapped to a zero rate (`rates.bootstrap_par_zero`).
+   - With `--exercise american`, the parity forward is then corrected for the early-exercise premium of its own near-the-money quotes (3 fixed-point passes, `surface._parity_premium`), because parity holds for European prices.
    - Put-call parity $C - P = D(T)(F(T) - K)$ is computed for matched strikes.
    - For each expiry, the 3 quote pairs closest to ATM ($|K - \text{spot}|$) are selected, and $F(T) = \text{median}(\hat{F}_i)$ is assigned. Log-moneyness $k = \ln(K / F(T))$ is derived.
 4. **OTM Slice Filtering**:
@@ -123,7 +124,7 @@ The lifecycle of data through the repository progresses through 8 stages:
    - Any quote with $mid < 0.05$ is dropped to avoid tick-floor noise.
 5. **Implied Volatility Inversion**:
    - `--exercise european`: for each quote, `implied_volatility()` verifies static no-arbitrage bounds ($D\max(F-K,0) < C < DF$) and Brent's method solves for $\sigma_{\text{imp}}$ in $[10^{-5}, 5.0]$.
-   - `--exercise american` (default): XIU options are American-style, so `american_implied_vols()` inverts a Cox-Ross-Rubinstein tree per expiry and side with a safeguarded Newton iteration. The continuous dividend yield $q = r - \ln(F/S)/T$ is implied by the parity forward.
+   - `--exercise american` (default): XIU options are American-style, so `american_implied_vols()` inverts a Cox-Ross-Rubinstein tree per expiry and side with a safeguarded Newton iteration. The tree is anchored to the parity forward through $q = r - \ln(F/S)/T$. With a dividend schedule (`american.Dividends`) it runs on $S^* = Se^{-qT}$ and values early exercise on $S^* + \text{PV(remaining dividends)}$; without one it uses $q$ as a continuous yield.
    - Either way, every slice records the early-exercise premium at its fitted vol and the first-order vol bias $\text{premium}/\mathcal{V}$.
    - Total variance is formed: $w(k, T) = \sigma_{\text{imp}}^2 \cdot T$.
 6. **Raw SVI Slice Calibration**:
@@ -175,11 +176,11 @@ The lifecycle of data through the repository progresses through 8 stages:
 - `american_price`, `european_tree_price`: CRR tree vectorized over strikes of one expiry (average of $n$ and $n+1$ steps to damp oscillation).
 - `american_implied_vols`, `american_implied_volatility`: tree inversion; NaN or `ValueError` outside the arbitrage bounds.
 - `early_exercise_bias`: premium of American over European at a given vol and its first-order vol overstatement.
-- Dividends enter as a continuous yield implied by the forward (a documented shortcut).
+- `Dividends(times, amounts)`: discrete cash dividends; `american_price(..., dividends=...)` switches the tree to escrowed discrete dividends (scaled so the forward is unchanged).
 
 ### `tsx60_iv.rates`
 - `RateCurve`: zero rates by tenor, snapshot to and from JSON.
-- `fetch_boc_curve(as_of)`: one Bank of Canada Valet request for CORRA, 1m/3m/6m/1y T-bills and the 2y benchmark bond; money-market yields convert as $r = \ln(1+y\tau)/\tau$.
+- `fetch_boc_curve(as_of)`: one Bank of Canada Valet request for CORRA, 1m/3m/6m/1y T-bills and the 2y benchmark bond; money-market yields convert as $r = \ln(1+y\tau)/\tau$ and the 2y par yield is bootstrapped. The snapshot keeps the raw quoted yields.
 - `python -m tsx60_iv.rates --as-of DATE --out PATH` writes a snapshot (explicit network call; tests never call it).
 
 ### `tsx60_iv.market_params`

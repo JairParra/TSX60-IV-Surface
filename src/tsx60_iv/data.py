@@ -88,6 +88,7 @@ def estimate_forward_and_rates(
     chain_df: pd.DataFrame,
     spot: float,
     r_cad: float | RateCurve = 0.0375,
+    mid_adjustment: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Estimate forwards by put-call parity and calculate log-moneyness.
 
@@ -100,6 +101,10 @@ def estimate_forward_and_rates(
     r_cad
         Continuously compounded CAD risk-free rate: a constant, or a
         ``RateCurve`` evaluated at each expiry's time to expiry.
+    mid_adjustment
+        Optional amount subtracted from each filtered quote's mid in the parity
+        step only (indexed like this function's own output), for example the
+        early-exercise premium of American quotes.
 
     Returns
     -------
@@ -121,15 +126,20 @@ def estimate_forward_and_rates(
         raise ValueError("no expirations after as_of")
     clean["rate"] = r_cad(clean["time_to_expiry"]) if callable(r_cad) else float(r_cad)
     clean["discount"] = np.exp(-clean["rate"] * clean["time_to_expiry"])
+    adjustment = 0.0 if mid_adjustment is None else mid_adjustment
+    clean["parity_mid"] = clean["mid"] - pd.Series(
+        adjustment, index=clean.index
+    ).fillna(0.0)
     calls = clean.loc[clean["option_type"].str.lower() == "call"]
     puts = clean.loc[clean["option_type"].str.lower() == "put"]
     pairs = calls.merge(
-        puts[["expiration", "strike", "mid"]],
+        puts[["expiration", "strike", "parity_mid"]],
         on=["expiration", "strike"],
         suffixes=("_call", "_put"),
     )
     pairs["forward_estimate"] = (
-        pairs["strike"] + (pairs["mid_call"] - pairs["mid_put"]) / pairs["discount"]
+        pairs["strike"]
+        + (pairs["parity_mid_call"] - pairs["parity_mid_put"]) / pairs["discount"]
     )
     pairs["distance"] = abs(pairs["strike"] - spot)
     if pairs.empty:

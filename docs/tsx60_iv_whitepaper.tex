@@ -77,16 +77,19 @@ six nodes: CORRA overnight, the 1, 3, 6 and 12 month Treasury bills and the
 2 year benchmark bond. A quoted yield $y$ becomes a continuously compounded
 zero rate by
 \begin{equation}
-  r=\frac{\ln(1+y\tau)}{\tau}\ \ (\text{money market, simple yield}),\qquad
-  r=2\ln\!\bigl(1+\tfrac y2\bigr)\ \ (\text{semi-annual par yield}),
+  r=\frac{\ln(1+y\tau)}{\tau}\qquad(\text{money-market simple yield}),
 \end{equation}
-with $\tau$ the tenor in years. Each node uses the last print on or before the
+with $\tau$ the tenor in years. The 2 year benchmark is a semi-annual par yield
+$c$, so its zero rate $r_2$ is bootstrapped: it solves
+$\sum_{t=0.5,1,1.5}\tfrac c2e^{-r(t)t}+(1+\tfrac c2)e^{-2r_2}=1$, where $r(t)$
+for $t\le 1$ comes from the shorter nodes and $r(1.5)$ is linear between $r(1)$
+and $r_2$. On 2025-01-02 the bootstrapped zero is 2.907\% against 2.909\% if the
+par yield is used directly, so the shortcut was worth about 0.15 basis points
+there. Each node uses the last print on or before the
 valuation date; a missing or older-than-10-day print raises an error. $r(T)$ is
-linear in the tenor between nodes and flat beyond the end nodes. The 2 year par
-yield stands in for the zero yield, a few basis points off; bootstrapping the
-benchmark curve would be the upgrade if longer tenors mattered. The checked-in
-snapshot is the curve of 2025-01-02 (2.91--3.30\%, downward sloping); tests
-never call the Valet API.
+linear in the tenor between nodes and flat beyond the end nodes. The checked-in
+snapshot is the curve of 2025-01-02 (2.91--3.30\%, downward sloping) and also
+stores the raw quoted yields for audit; tests never call the Valet API.
 
 \section{Forward estimation}\label{sec:forward}
 
@@ -152,10 +155,22 @@ $d=1/u$ and $p=\bigl(e^{(r-q)\Delta t}-d\bigr)/(u-d)$,
 The reported value averages the trees with $n$ and $n+1$ steps, which damps the
 odd-even oscillation of CRR. The continuous yield is the one implied by the
 parity forward, $q=r-\ln(F/S)/T$, so the tree's forward equals $F$ exactly.
-Tests check the tree against closed-form BSM for the European case, the
+
+\paragraph{Discrete dividends.} With a dividend schedule the tree instead runs
+on the dividend-free price $S^*=Se^{-qT}$, and early exercise at a node of time
+$t$ is valued on $S^*+\mathrm{PV}_t$, where $\mathrm{PV}_t$ is the value of the
+dividends still to be paid before expiry. The schedule only times the
+dividends: $\mathrm{PV}_0$ is rescaled to $S-S^*$, so the forward is unchanged
+(a schedule more than twice off the forward is ignored in favour of the
+continuous yield). A call is then worth most just before an ex-date, which a
+continuous yield spreads over the whole life.
+
+\paragraph{Tests.} Tests check the tree against closed-form BSM for the European case, the
 published American put value (about 6.09 for $S=K=100$, $r=5\%$,
 $\sigma=20\%$, $T=1$), $P_A\ge P_E$ and $P_A\ge$ intrinsic, and the
-McDonald-Schroder symmetry $P_A(S,K,r,q)=C_A(K,S,q,r)$.
+McDonald-Schroder symmetry $P_A(S,K,r,q)=C_A(K,S,q,r)$; for dividends, that
+both models share the European price and that a call just before a large
+dividend is worth more with the discrete schedule.
 
 Prices are inverted by a safeguarded Newton iteration on the tree (European
 vega as the slope, bisection fallback). A price at or below intrinsic value, or
@@ -167,11 +182,22 @@ volatility and the first-order bias
   \text{vol bias}\approx\frac{\text{premium}}{\mathcal V},
 \end{equation}
 the amount by which a European inversion overstates the volatility, together
-with the number of quotes whose premium exceeds half their bid-ask spread. On
-the demo, out-of-the-money quotes show at most 0.15 vol points of bias, and the
-European inversion overstates the ATM level by about 0.06 points on average.
-The continuous yield stands in for discrete quarterly dividends, which
-understates the premium of calls just before an ex-date.
+with the number of quotes whose premium exceeds half their bid-ask spread.
+
+\paragraph{Forward from American mids.} Put-call parity holds for European
+prices, so the parity forward is corrected for the early-exercise premium of its
+own quotes. After a first parity estimate, the premium of every quote within 6\%
+of the forward is computed at its European volatility and subtracted from the
+mid, and the forward is re-estimated; three passes converge. On the demo this
+cuts the forward error from up to 0.33\% of $F$ (the expiry that falls on an
+ex-date) to about 0.01\%.
+
+\paragraph{Size of the effects on the demo.} Against the generating surface,
+the tree with the dividend schedule and the corrected forward leaves a mean ATM
+error of $+0.003$ vol points (largest 0.07), where a European inversion of the
+same quotes overstates ATM vol by 0.27 points on average and up to 0.74. The
+exercise premium of out-of-the-money quotes is at most 0.5 vol points except for
+the two expiries that fall on or next to an ex-date (about 1.9 and 1.0).
 
 \section{Raw SVI calibration and arbitrage checks}\label{sec:svi}
 
@@ -246,12 +272,15 @@ trades about 3.5 points above the ATM level.
 Expiries are monthly third Fridays (the Thursday before when that is Good
 Friday). Spot (37.70) and the four trailing quarterly dividends come from one
 free Yahoo history request (module \texttt{market\_params}, derived statistics
-only); the next year's dividends repeat them one year later. The forward is
+only); the next year's dividends repeat them 364 days later. The forward is
 $F=(S-\mathrm{PV}(\text{dividends}))e^{rT}$ with the Bank of Canada curve.
-Each option is priced with the American tree at the truth volatility, then
-quoted with 0.01 ticks, a spread of $\max(0.02,\,0.05m)$ for mid $m$, and a
-seeded random shift of up to a quarter spread, so the chain is deterministic.
-The pipeline then recovers the truth to within 0.15 vol points at the money.
+Each option is priced with the discrete-dividend American tree at the truth
+volatility, so the generating process contains the effect the inversion must
+undo (an earlier version generated and inverted with the same continuous-yield
+tree, which hid this error). Quotes then get
+0.01 ticks, a spread of $\max(0.02,\,0.05m)$ for mid $m$, and a seeded random
+shift of up to a quarter spread, so the chain is deterministic. The pipeline
+then recovers the truth to within 0.08 vol points at the money.
 This shows the machinery works on market-shaped quotes; it is not a market
 view.
 
@@ -259,14 +288,15 @@ view.
 
 \begin{itemize}
   \item The risk-free curve is a single snapshot (2025-01-02) with flat
-        extrapolation beyond 2 years, and the 2 year par yield stands in for
-        the zero yield. A flat rate is still available with \texttt{--rate}.
+        extrapolation beyond 2 years. A flat rate is still available with
+        \texttt{--rate}.
   \item Montr\'eal Exchange \texttt{XIU} ETF options are American-style. The
-        default inversion uses the binomial tree with a continuous dividend
-        yield implied by the forward; discrete quarterly dividends (and the
-        early exercise of calls just before an ex-date) are approximated.
-        Parity forwards use American mids, a small bias that the tests
-        bound on the demo.
+        default inversion uses the binomial tree and, for the demo, an expected
+        dividend schedule (the trailing four dividends repeated a year later,
+        with no growth). Without a schedule the tree falls back to a continuous
+        yield, which the tests show overstates ATM vol on the demo. Dividends
+        are discounted at the expiry's own zero rate, and the parity forward is
+        corrected for early exercise as described above.
   \item The 0.35 relative-spread filter and the three-strike forward window are
         fixed choices, not tuned on market data.
   \item Calibration is a local multi-start and has been tested only on

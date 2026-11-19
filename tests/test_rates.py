@@ -9,7 +9,12 @@ import numpy as np
 import pytest
 
 from tsx60_iv import rates
-from tsx60_iv.rates import RateCurve, curve_from_observations, to_zero_rate
+from tsx60_iv.rates import (
+    RateCurve,
+    bootstrap_par_zero,
+    curve_from_observations,
+    to_zero_rate,
+)
 from tsx60_iv.synthetic import BOC_CURVE_PATH
 
 ROWS = [
@@ -31,11 +36,32 @@ def test_money_market_yield_converts_to_continuous_rate() -> None:
     assert np.exp(-r * 0.25) == pytest.approx(1 / (1 + 0.04 * 0.25), rel=1e-12)
 
 
-def test_par_yield_converts_semiannual_to_continuous() -> None:
-    """A 3% semi-annual yield is 2 * ln(1.015) continuously compounded."""
-    assert to_zero_rate(3.0, 2.0, "par") == pytest.approx(2 * np.log(1.015))
+def _par_yield_pct(zero_at: "np.ufunc", maturity: float) -> float:
+    """Par coupon (percent) of a semi-annual bond on the given zero curve."""
+    dates = np.arange(0.5, maturity + 1e-9, 0.5)
+    discounts = np.exp(-zero_at(dates) * dates)
+    return float(200.0 * (1.0 - discounts[-1]) / discounts.sum())
+
+
+def test_bootstrap_recovers_a_flat_zero_curve() -> None:
+    """The par yield of a flat 3% zero curve bootstraps back to 3%."""
+    par = _par_yield_pct(lambda t: np.full_like(t, 0.03), 2.0)
+    assert bootstrap_par_zero(par, 2.0, (0.5, 1.0), (0.03, 0.03)) == pytest.approx(
+        0.03, abs=1e-12
+    )
+
+
+def test_bootstrap_recovers_a_sloped_zero_curve() -> None:
+    """With zero rates linear in tenor, the 2y zero is recovered exactly."""
+    par = _par_yield_pct(lambda t: 0.02 + 0.01 * t, 2.0)
+    zero = bootstrap_par_zero(par, 2.0, (0.5, 1.0), (0.025, 0.03))
+    assert zero == pytest.approx(0.04, abs=1e-12)
+
+
+def test_par_yield_is_not_treated_as_a_money_market_yield() -> None:
+    """Only money-market yields convert directly; par needs the bootstrap."""
     with pytest.raises(ValueError, match="convention"):
-        to_zero_rate(3.0, 1.0, "act")
+        to_zero_rate(3.0, 2.0, "par")
 
 
 def test_curve_interpolates_and_extrapolates_flat() -> None:
@@ -96,6 +122,7 @@ def test_bundled_snapshot_is_a_plausible_cad_curve() -> None:
     curve = RateCurve.from_json(BOC_CURVE_PATH)
     assert len(curve.tenors) == 6 and curve.as_of == "2025-01-02"
     assert all(0.02 < r < 0.04 for r in curve.zero_rates)
+    assert curve.quoted_yields_pct == (3.3, 3.19, 3.16, 3.09, 3.03, 2.93)
     assert all(d <= curve.as_of for d in curve.observation_dates)
 
 

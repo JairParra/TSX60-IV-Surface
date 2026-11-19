@@ -1,6 +1,5 @@
 """Synthetic XIU-style option chain for the offline fixture and the demo surface."""
 
-import json
 from dataclasses import dataclass
 from datetime import date, timedelta
 from functools import lru_cache
@@ -11,8 +10,9 @@ import numpy as np
 import pandas as pd
 from dateutil.easter import easter
 
-from tsx60_iv.american import american_price
+from tsx60_iv.american import Dividends, american_price
 from tsx60_iv.bsm import bsm_price
+from tsx60_iv.market_params import expected_dividends, load_params
 from tsx60_iv.rates import RateCurve
 
 SPOT = 38.50
@@ -192,13 +192,11 @@ def _forward_inputs(
     spot: float,
     time: float,
     curve: RateCurve,
-    dividends: list[tuple[float, float]],
+    dividends: Dividends,
 ) -> tuple[float, float, float]:
     """Return (rate, forward, implied_yield) using escrowed discrete dividends."""
     rate = float(curve(time))
-    pv = sum(
-        amount * np.exp(-float(curve(t)) * t) for t, amount in dividends if t <= time
-    )
+    pv = dividends.pv(0.0, rate, time)
     forward = (spot - pv) * np.exp(rate * time)
     return rate, float(forward), rate - float(np.log(forward / spot)) / time
 
@@ -206,18 +204,10 @@ def _forward_inputs(
 @lru_cache(maxsize=4)
 def _realistic_chain(seed: int, steps: int, surface: SsviSurface) -> pd.DataFrame:
     surface.check_no_arbitrage()
-    params = json.loads(MARKET_PARAMS_PATH.read_text(encoding="utf-8"))
+    params = load_params(MARKET_PARAMS_PATH)
     curve = RateCurve.from_json(BOC_CURVE_PATH)
     as_of, spot = date.fromisoformat(params["as_of"]), float(params["spot"])
-    # shortcut: next year's dividends repeat the trailing four, one year later.
-    dividends = [
-        (
-            (date.fromisoformat(d["ex_date"]) + timedelta(days=364) - as_of).days
-            / 365.0,
-            float(d["amount"]),
-        )
-        for d in params["dividends"]
-    ]
+    dividends = expected_dividends(params)
     rng = np.random.default_rng(seed)
     strikes = strike_grid(spot)
     rows: list[dict[str, Any]] = []
@@ -227,7 +217,7 @@ def _realistic_chain(seed: int, steps: int, surface: SsviSurface) -> pd.DataFram
         vols = surface.vol(np.log(strikes / forward), time)
         for kind in ("call", "put"):
             mid = american_price(
-                spot, strikes, time, rate, div_yield, vols, kind, steps
+                spot, strikes, time, rate, div_yield, vols, kind, steps, dividends
             )
             spread = np.maximum(0.02, 0.05 * mid)
             shifted = mid + rng.uniform(-1.0, 1.0, mid.size) * 0.25 * spread
