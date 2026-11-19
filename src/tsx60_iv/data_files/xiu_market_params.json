@@ -1,0 +1,29 @@
+{
+  "ticker": "XIU.TO",
+  "as_of": "2025-01-02",
+  "spot": 37.7,
+  "realized_vol": {
+    "21d": 0.1089,
+    "63d": 0.0884,
+    "252d": 0.1012
+  },
+  "dividends": [
+    {
+      "ex_date": "2024-02-23",
+      "amount": 0.254
+    },
+    {
+      "ex_date": "2024-05-22",
+      "amount": 0.259
+    },
+    {
+      "ex_date": "2024-08-27",
+      "amount": 0.266
+    },
+    {
+      "ex_date": "2024-11-21",
+      "amount": 0.315
+    }
+  ],
+  "provenance": "Derived statistics from Yahoo Finance daily history via yfinance (free, personal use). No price series is stored or redistributed."
+}

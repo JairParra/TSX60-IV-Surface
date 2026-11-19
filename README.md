@@ -119,9 +119,28 @@ uv run uvicorn tsx60_iv.api:app --port 8000
 
 Open <http://127.0.0.1:8000/> for the interactive 3D surface, smile, Durrleman
 `g(k)` and term-structure plots, with the formulas filled in for the selected
-expiry. The demo uses a built-in synthetic chain and the page says so. Re-run
+expiry. The demo uses a generated chain (an arbitrage-free SSVI truth anchored to
+XIU.TO's January 2025 realized volatility, priced American-style with the Bank of
+Canada curve of 2025-01-02) and the page says it is synthetic. Re-run
 the first command to refresh; the page re-checks the file every 30 s and never
 contacts Yahoo.
+
+Useful flags: `--exercise european|american` (default `american`, the right
+model for XIU options; `european` shows the bias of ignoring early exercise),
+`--curve PATH` or `--rate 0.03` to change the discount curve.
+
+The two data anchors are checked-in snapshots under `src/tsx60_iv/data_files/`.
+Regenerating them is an explicit, free, one-request-each network call:
+
+```bash
+uv run python -m tsx60_iv.rates --as-of 2025-01-02 --out src/tsx60_iv/data_files/boc_curve_2025-01-02.json
+uv run python -m tsx60_iv.market_params --as-of 2025-01-02 --out src/tsx60_iv/data_files/xiu_market_params.json
+```
+
+The first reads the Bank of Canada Valet API (open data, see
+<https://www.bankofcanada.ca/terms/>); the second derives XIU.TO's closing spot,
+realized volatility and trailing dividends from Yahoo Finance. Neither is called
+by tests or CI.
 
 ### Live data
 

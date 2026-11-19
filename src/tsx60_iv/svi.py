@@ -88,7 +88,22 @@ def calibrate_svi_slice(
 
     eps = 1e-6
     bounds = [(None, None), (0.0, None), (-1 + eps, 1 - eps), (None, None), (eps, None)]
-    constraints = [{"type": "ineq", "fun": min_variance}]
+    # Butterfly freedom is a constraint of the fit, not a repair afterwards:
+    # g(k) >= 0 on a grid extending beyond the quoted strikes.
+    wing_grid = np.concatenate([x, np.linspace(x.min() - 0.5, x.max() + 0.5, 201)])
+
+    def butterfly(p: NDArray[np.float64]) -> NDArray[np.float64]:
+        try:
+            with np.errstate(all="ignore"):
+                g = durrleman_g(wing_grid, *p)
+        except ValueError:  # trial point with negative minimum variance
+            return np.full(wing_grid.shape, -1.0)
+        return np.where(np.isfinite(g), g, -1.0)
+
+    constraints = [
+        {"type": "ineq", "fun": min_variance},
+        {"type": "ineq", "fun": butterfly},
+    ]
     m0 = x[np.argmin(w)]
     b0 = max(np.ptp(w) / np.ptp(x), 1e-3)
     # shortcut: multi-start local SLSQP, not a global optimizer; upgrade if real
@@ -109,7 +124,7 @@ def calibrate_svi_slice(
     if best is None:
         raise ValueError("SVI calibration did not converge")
     params = best.x
-    grid = np.concatenate([x, np.linspace(x.min() - 0.5, x.max() + 0.5, 201)])
+    grid = wing_grid  # the fit already met g >= 0 on this grid
     if not check_butterfly_arbitrage(grid, *params).all():  # also checks min variance
         raise ValueError("fitted SVI slice has butterfly arbitrage")
     return params

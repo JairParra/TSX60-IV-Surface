@@ -2,6 +2,16 @@
 
 ## Session Log
 
+## 2026-11-19 — Simulation realism: BoC curve, American exercise, SSVI demo chain
+- **Model & Skills Used:** `sonnet` + `/ponytail:ponytail`, built-in browser for UI checks
+- **Completed:**
+  - Scope decision: simulation only, no paid or real quotes. Free sources used for anchors only: Bank of Canada Valet (curve snapshot, one request) and Yahoo (XIU.TO spot, realized vol, dividends; derived statistics only).
+  - New `rates.py` (per-expiry zero rates, snapshot JSON), `american.py` (vectorized CRR tree, Newton inversion, early-exercise bias), `market_params.py`, `data_files/`; `synthetic.generate_realistic_chain` (arbitrage-free SSVI truth, American prices, third-Friday expiries, 0.01 ticks); `estimate_forward_and_rates` accepts a `RateCurve`.
+  - `calibrate_svi_slice` now imposes Durrleman `g >= 0` as a constraint (12 of 13 demo expiries fit, was 7 of 13 with rejects); `surface.py` gains `--exercise`, `--curve`, per-slice rate, implied dividend yield and bias diagnostics; page, README, `docs/README.md`, whitepaper and PDF updated.
+  - `uv run pytest -v`: 90 passed. `uv run ruff check .`: clean. Page checked in the built-in browser.
+- **Key Decisions / Invariants:** Butterfly freedom is a fit constraint and is re-checked, never repaired. Demo recovers the SSVI truth within 0.15 vol pts ATM; European inversion overstates ATM vol by about 0.06 pts versus the tree. Continuous dividend yield stands in for discrete dividends (flagged shortcut).
+- **Next Step:** Optional polish: discrete-dividend tree, bootstrapped zero curve, a tracked list of the Valet series codes; otherwise open the PR and review CI.
+
 ## 2026-11-19 — Repository documentation and OpenAPI 304 response
 - **Completed:**
   - Authored comprehensive architectural and functional documentation in `docs/README.md`.

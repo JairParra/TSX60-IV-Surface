@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from tsx60_iv.rates import RateCurve
+
 _DEFAULT_TICKER: Final = "XIU.TO"
 _PAUSE_SECONDS: Final = 1.5
 
@@ -85,7 +87,7 @@ def _filter_quoted_chain(chain_df: pd.DataFrame) -> pd.DataFrame:
 def estimate_forward_and_rates(
     chain_df: pd.DataFrame,
     spot: float,
-    r_cad: float = 0.0375,
+    r_cad: float | RateCurve = 0.0375,
 ) -> pd.DataFrame:
     """Estimate forwards by put-call parity and calculate log-moneyness.
 
@@ -96,12 +98,13 @@ def estimate_forward_and_rates(
     spot
         Current ETF spot price.
     r_cad
-        Continuously compounded CAD risk-free rate.
+        Continuously compounded CAD risk-free rate: a constant, or a
+        ``RateCurve`` evaluated at each expiry's time to expiry.
 
     Returns
     -------
     pandas.DataFrame
-        Clean quotes augmented with time, forward, discount, and
+        Clean quotes augmented with time, rate, discount, forward, and
         ``log_moneyness`` columns.
     """
     if spot <= 0 or not np.isfinite(spot):
@@ -116,7 +119,8 @@ def estimate_forward_and_rates(
     clean = clean.loc[clean["time_to_expiry"] > 0].reset_index(drop=True)
     if clean.empty:
         raise ValueError("no expirations after as_of")
-    clean["discount"] = np.exp(-r_cad * clean["time_to_expiry"])
+    clean["rate"] = r_cad(clean["time_to_expiry"]) if callable(r_cad) else float(r_cad)
+    clean["discount"] = np.exp(-clean["rate"] * clean["time_to_expiry"])
     calls = clean.loc[clean["option_type"].str.lower() == "call"]
     puts = clean.loc[clean["option_type"].str.lower() == "put"]
     pairs = calls.merge(
