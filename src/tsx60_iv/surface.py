@@ -11,9 +11,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from tsx60_iv.american import american_implied_vols, early_exercise_bias
+from tsx60_iv.american import (
+    Dividends,
+    american_implied_vols,
+    early_exercise_bias,
+)
 from tsx60_iv.bsm import implied_volatility
 from tsx60_iv.data import estimate_forward_and_rates, fetch_xiu_chain
+from tsx60_iv.market_params import expected_dividends, load_params
 from tsx60_iv.rates import RateCurve
 from tsx60_iv.svi import (
     calibrate_svi_slice,
@@ -21,7 +26,11 @@ from tsx60_iv.svi import (
     durrleman_g,
     raw_svi_variance,
 )
-from tsx60_iv.synthetic import BOC_CURVE_PATH, generate_realistic_chain
+from tsx60_iv.synthetic import (
+    BOC_CURVE_PATH,
+    MARKET_PARAMS_PATH,
+    generate_realistic_chain,
+)
 
 SCHEMA_VERSION = 2
 DEFAULT_RATE = 0.0375  # flat CAD rate when no curve snapshot is given
@@ -67,7 +76,10 @@ def _european_vols(otm: pd.DataFrame, counts: dict[str, int]) -> np.ndarray:
 
 
 def _american_vols(
-    otm: pd.DataFrame, spot: float, counts: dict[str, int]
+    otm: pd.DataFrame,
+    spot: float,
+    counts: dict[str, int],
+    dividends: Dividends | None,
 ) -> np.ndarray:
     """Invert mids with a binomial tree per expiry and side, counting failures."""
     vols = np.full(len(otm), np.nan)
@@ -82,6 +94,7 @@ def _american_vols(
             first["rate"],
             q,
             first["kind"],
+            dividends=dividends,
         )
         vols[g["pos"].to_numpy()] = result
         is_call = first["kind"] == "call"
@@ -96,8 +109,60 @@ def _american_vols(
     return vols
 
 
+REFINE_PASSES = 3  # parity <-> early-exercise premium fixed-point passes
+PARITY_BAND = 0.06  # quotes within 6% of the forward can enter the parity step
+
+
+def _parity_premium(
+    clean: pd.DataFrame, spot: float, dividends: Dividends | None
+) -> pd.Series:
+    """Early-exercise premium of near-the-money quotes at their European vols.
+
+    Subtracting it turns American mids into European-equivalent mids, which is
+    what put-call parity holds for.
+    """
+    kind = clean["option_type"].str.lower()
+    near = (clean["strike"] / clean["forward"] - 1.0).abs() < PARITY_BAND
+    premium = pd.Series(0.0, index=clean.index)
+    for _, g in clean.loc[near].assign(kind=kind).groupby(["expiration", "kind"]):
+        first = g.iloc[0]
+        vols = np.array(
+            [_european_iv_or_nan(row, first["kind"]) for row in g.itertuples()]
+        )
+        ok = np.isfinite(vols)
+        if not ok.any():
+            continue
+        values, _ = early_exercise_bias(
+            vols[ok],
+            spot,
+            first["forward"],
+            g["strike"].to_numpy()[ok],
+            first["time_to_expiry"],
+            first["rate"],
+            first["kind"],
+            dividends=dividends,
+        )
+        premium.loc[g.index[ok]] = values
+    return premium
+
+
+def _european_iv_or_nan(row: Any, kind: str) -> float:
+    try:
+        return float(
+            implied_volatility(
+                row.mid, row.forward, row.strike, row.time_to_expiry, row.discount, kind
+            )
+        )
+    except ValueError:
+        return float("nan")
+
+
 def _otm_implied_vols(
-    clean: pd.DataFrame, min_mid: float, spot: float, exercise: str
+    clean: pd.DataFrame,
+    min_mid: float,
+    spot: float,
+    exercise: str,
+    dividends: Dividends | None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     """Invert out-of-the-money mids and measure the early-exercise bias."""
     kind = clean["option_type"].str.lower()
@@ -111,7 +176,7 @@ def _otm_implied_vols(
         "solver_bracket": 0,
     }
     if exercise == "american":
-        otm["iv"] = _american_vols(otm, spot, counts)
+        otm["iv"] = _american_vols(otm, spot, counts, dividends)
     else:
         otm["iv"] = _european_vols(otm, counts)
     otm = otm.dropna(subset=["iv"]).copy()
@@ -127,6 +192,7 @@ def _otm_implied_vols(
             first["time_to_expiry"],
             first["rate"],
             first["kind"],
+            dividends=dividends,
         )
         otm.loc[g.index, "premium"] = premium
         otm.loc[g.index, "vol_bias"] = bias
@@ -236,6 +302,7 @@ def build_surface(
     synthetic: bool,
     min_mid: float = MIN_MID,
     exercise: str = "american",
+    dividends: Dividends | None = None,
 ) -> dict[str, Any]:
     """Build the surface document; rejected expiries are reported, never repaired."""
     if exercise not in EXERCISES:
@@ -243,7 +310,13 @@ def build_surface(
     as_of = pd.Timestamp(chain["as_of"].iloc[0]).date().isoformat()
     curve = rate if isinstance(rate, RateCurve) else RateCurve.flat(rate, as_of)
     clean = estimate_forward_and_rates(chain, spot, curve)
-    otm, counts = _otm_implied_vols(clean, min_mid, spot, exercise)
+    if exercise == "american":
+        for _ in range(REFINE_PASSES):
+            adjustment = _parity_premium(clean, spot, dividends)
+            clean = estimate_forward_and_rates(
+                chain, spot, curve, mid_adjustment=adjustment
+            )
+    otm, counts = _otm_implied_vols(clean, min_mid, spot, exercise, dividends)
     slices: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for expiration in sorted(clean["expiration"].unique()):
@@ -290,6 +363,7 @@ def build_surface(
             "synthetic": synthetic,
             "spot": float(spot),
             "exercise": exercise,
+            "dividends": "schedule" if dividends is not None else "continuous",
             "rate_curve": {
                 "source": curve.source,
                 "as_of": curve.as_of,
@@ -329,13 +403,32 @@ def main() -> None:
     parser.add_argument("--spot", type=float)
     parser.add_argument("--rate", type=float, help="flat CAD rate (default 3.75%%)")
     parser.add_argument("--curve", type=Path, help="Bank of Canada curve snapshot")
+    parser.add_argument(
+        "--min-mid",
+        type=float,
+        default=MIN_MID,
+        help="drop quotes with a mid below this (about five ticks)",
+    )
     parser.add_argument("--exercise", choices=EXERCISES, default="american")
+    parser.add_argument(
+        "--dividends",
+        choices=("schedule", "continuous"),
+        help="discrete expected dividends (demo default) or a continuous yield",
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--mlflow", action="store_true", help="log the run to MLflow")
     args = parser.parse_args()
 
     if args.rate is not None and args.curve is not None:
         raise SystemExit("pass either --rate or --curve, not both")
+    use_schedule = (
+        args.dividends or ("schedule" if args.demo else "continuous")
+    ) == "schedule"
+    if use_schedule and not args.demo:
+        raise SystemExit("--dividends schedule is only available with --demo")
+    dividends = (
+        expected_dividends(load_params(MARKET_PARAMS_PATH)) if use_schedule else None
+    )
     if args.demo:
         chain = generate_realistic_chain()
         spot = float(chain["spot"].iloc[0])
@@ -369,6 +462,8 @@ def main() -> None:
         source=source,
         synthetic=synthetic,
         exercise=args.exercise,
+        dividends=dividends,
+        min_mid=args.min_mid,
     )
     write_surface(surface, args.out)
     meta = surface["meta"]

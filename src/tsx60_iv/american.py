@@ -3,14 +3,21 @@
 XIU options are American-style while ``bsm.py`` prices European options. This
 module quantifies how much that matters and can invert American prices.
 
-Dividends enter as a continuous yield ``q``. For an expiry with parity forward
-``F`` the matching yield is ``q = r - ln(F / S) / T``, so the tree's forward
-equals ``F`` exactly.
-# shortcut: continuous yield stands in for discrete quarterly dividends, so
-# the premium of calls just before an ex-date is understated; upgrade to a
-# discrete-dividend tree if that matters.
+Every expiry has a parity forward ``F``, so the tree is anchored to it through
+the implied continuous yield ``q = r - ln(F / S) / T``: the tree's forward
+equals ``F`` exactly. Two ways to realise the dividends:
+
+- continuous yield ``q`` (default, needs no schedule), or
+- escrowed discrete cash dividends (``dividends=Dividends(...)``): the tree
+  runs on the dividend-free price ``S* = S e^(-qT)`` and, at each node, early
+  exercise is valued on ``S* + PV(remaining dividends)``. The schedule only
+  times the dividends; its present value is scaled to the forward-implied
+  total so the forward is unchanged. Calls are then worth most just before an
+  ex-date, which a continuous yield spreads out.
 """
 
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Literal
 
 import numpy as np
@@ -20,6 +27,47 @@ from tsx60_iv.bsm import bsm_greeks
 
 OptionType = Literal["call", "put"]
 DEFAULT_STEPS = 200
+MAX_SCALE = 2.0  # schedule and forward may disagree by at most this factor
+
+
+@dataclass(frozen=True)
+class Dividends:
+    """Discrete cash dividends as ``(time in years, amount)`` pairs."""
+
+    times: tuple[float, ...]
+    amounts: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        """Validate the schedule."""
+        if len(self.times) != len(self.amounts):
+            raise ValueError("times and amounts must have the same length")
+        if any(t <= 0 for t in self.times) or any(a <= 0 for a in self.amounts):
+            raise ValueError("dividend times and amounts must be positive")
+
+    def pv(self, at: float, rate: float, until: float) -> float:
+        """Value at ``at`` of dividends paid strictly after ``at`` up to ``until``."""
+        return float(
+            sum(
+                amount * np.exp(-rate * (t - at))
+                for t, amount in zip(self.times, self.amounts, strict=True)
+                if at < t <= until
+            )
+        )
+
+
+@lru_cache(maxsize=512)
+def _pv_levels(
+    dividends: Dividends, time: float, rate: float, steps: int
+) -> NDArray[np.float64]:
+    """PV at every tree level of the dividends still to be paid before expiry."""
+    levels = np.arange(steps + 1) * time / steps
+    times = np.array(dividends.times)
+    amounts = np.array(dividends.amounts)
+    owed = (levels[:, None] < times[None, :]) & (times[None, :] <= time)
+    values = amounts[None, :] * np.exp(-rate * (times[None, :] - levels[:, None]))
+    result = np.where(owed, values, 0.0).sum(axis=1)
+    result.setflags(write=False)
+    return result
 
 
 def implied_dividend_yield(
@@ -43,6 +91,25 @@ def _validate(
         raise ValueError("vol must be positive")
 
 
+def _escrow(
+    dividends: Dividends | None,
+    spot: float,
+    time: float,
+    rate: float,
+    q: float,
+    steps: int,
+) -> tuple[float, float, NDArray[np.float64] | None]:
+    """Return ``(tree_spot, tree_yield, pv_levels)`` for the chosen dividend model."""
+    if dividends is None:
+        return spot, q, None
+    pv0 = dividends.pv(0.0, rate, time)
+    star = spot * float(np.exp(-q * time))
+    scale = (spot - star) / pv0 if pv0 > 0 else 0.0
+    if not 1.0 / MAX_SCALE <= scale <= MAX_SCALE:
+        return spot, q, None  # no dividend before expiry, or forward disagrees
+    return star, 0.0, scale * _pv_levels(dividends, time, rate, steps)
+
+
 def _tree(
     spot: float,
     strike: NDArray[np.float64],
@@ -53,6 +120,7 @@ def _tree(
     is_call: bool,
     steps: int,
     american: bool,
+    pv_levels: NDArray[np.float64] | None,
 ) -> NDArray[np.float64]:
     """CRR tree values at the root, vectorized over options sharing an expiry."""
     dt = time / steps
@@ -73,7 +141,8 @@ def _tree(
         )
         if american:
             nodes = ladder[:, steps - level : steps + level + 1 : 2]
-            value = np.maximum(value, sign * (spot * nodes - strike))
+            owed = 0.0 if pv_levels is None else pv_levels[level]
+            value = np.maximum(value, sign * (spot * nodes + owed - strike))
     return value[:, 0]
 
 
@@ -87,6 +156,7 @@ def _price(
     option_type: OptionType,
     steps: int,
     american: bool,
+    dividends: Dividends | None = None,
 ) -> Any:
     if option_type not in ("call", "put"):
         raise ValueError("option_type must be 'call' or 'put'")
@@ -95,9 +165,13 @@ def _price(
     strike_arr, vol_arr = np.broadcast_arrays(
         np.atleast_1d(np.asarray(strike, float)), np.atleast_1d(np.asarray(vol, float))
     )
-    args = (spot, strike_arr, time, rate, q, vol_arr, option_type == "call")
+    values = []
     # Averaging n and n+1 steps damps the odd-even oscillation of CRR trees.
-    value = 0.5 * (_tree(*args, steps, american) + _tree(*args, steps + 1, american))
+    for n in (steps, steps + 1):
+        tree_spot, tree_q, levels = _escrow(dividends, spot, time, rate, q, n)
+        args = (tree_spot, strike_arr, time, rate, tree_q, vol_arr)
+        values.append(_tree(*args, option_type == "call", n, american, levels))
+    value = 0.5 * (values[0] + values[1])
     return float(value[0]) if scalar else value
 
 
@@ -110,9 +184,12 @@ def american_price(
     vol: Any,
     option_type: OptionType = "call",
     steps: int = DEFAULT_STEPS,
+    dividends: Dividends | None = None,
 ) -> Any:
     """American value from a CRR tree; ``strike`` and ``vol`` may be arrays."""
-    return _price(spot, strike, time, rate, div_yield, vol, option_type, steps, True)
+    return _price(
+        spot, strike, time, rate, div_yield, vol, option_type, steps, True, dividends
+    )
 
 
 def european_tree_price(
@@ -124,9 +201,12 @@ def european_tree_price(
     vol: Any,
     option_type: OptionType = "call",
     steps: int = DEFAULT_STEPS,
+    dividends: Dividends | None = None,
 ) -> Any:
     """European value from the same tree (to isolate the exercise premium)."""
-    return _price(spot, strike, time, rate, div_yield, vol, option_type, steps, False)
+    return _price(
+        spot, strike, time, rate, div_yield, vol, option_type, steps, False, dividends
+    )
 
 
 def american_implied_vols(
@@ -138,8 +218,9 @@ def american_implied_vols(
     div_yield: float,
     option_type: OptionType,
     steps: int = DEFAULT_STEPS,
+    dividends: Dividends | None = None,
 ) -> NDArray[np.float64]:
-    """Invert American prices of one expiry by vectorized bisection.
+    """Invert American prices of one expiry by safeguarded Newton iteration.
 
     Returns NaN where a price is at or beyond its arbitrage bounds (intrinsic
     value, or the spot for a call and the strike for a put) or where the
@@ -159,11 +240,14 @@ def american_implied_vols(
     if not valid.any():
         return roots
     k, target = strike[valid], price[valid]
-    floor = 1e-4 + 2.0 * abs(rate - div_yield) * float(np.sqrt(time / steps))
+    drift = max(abs(rate - div_yield), abs(rate))  # either tree convention
+    floor = 1e-4 + 2.0 * drift * float(np.sqrt(time / steps))
     low, high = np.full(k.shape, floor), np.full(k.shape, 5.0)
 
     def gap(vol: NDArray[np.float64]) -> NDArray[np.float64]:
-        value = american_price(spot, k, time, rate, div_yield, vol, option_type, steps)
+        value = american_price(
+            spot, k, time, rate, div_yield, vol, option_type, steps, dividends
+        )
         return value - target
 
     bracketed = (gap(low) < 0.0) & (gap(high) > 0.0)
@@ -195,6 +279,7 @@ def american_implied_volatility(
     div_yield: float,
     option_type: OptionType = "call",
     steps: int = DEFAULT_STEPS,
+    dividends: Dividends | None = None,
 ) -> float:
     """Invert one American price; raises ``ValueError`` when there is no solution."""
     intrinsic = (
@@ -205,7 +290,7 @@ def american_implied_volatility(
         raise ValueError("price violates intrinsic-value arbitrage bounds")
     vol = float(
         american_implied_vols(
-            price, spot, strike, time, rate, div_yield, option_type, steps
+            price, spot, strike, time, rate, div_yield, option_type, steps, dividends
         )[0]
     )
     if not np.isfinite(vol):
@@ -222,6 +307,7 @@ def early_exercise_bias(
     rate: float,
     option_type: OptionType,
     steps: int = DEFAULT_STEPS,
+    dividends: Dividends | None = None,
 ) -> tuple[Any, Any]:
     """Return ``(premium, vol_bias)`` of treating an American quote as European.
 
@@ -232,7 +318,7 @@ def early_exercise_bias(
     """
     q = implied_dividend_yield(spot, forward, time, rate)
     kwargs = (spot, strike, time, rate, q, european_iv, option_type, steps)
-    premium = _price(*kwargs, True) - _price(*kwargs, False)
+    premium = _price(*kwargs, True, dividends) - _price(*kwargs, False, dividends)
     discount = float(np.exp(-rate * time))
     vega = bsm_greeks(forward, strike, time, discount, european_iv, option_type)["vega"]
     return premium, premium / vega

@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from tsx60_iv.american import Dividends
+
 REALIZED_WINDOWS = (21, 63, 252)  # trading days
 TRADING_DAYS = 252
 
@@ -47,6 +49,30 @@ def derive_params(history: pd.DataFrame, as_of: date, ticker: str) -> dict[str, 
             "(free, personal use). No price series is stored or redistributed."
         ),
     }
+
+
+def expected_dividends(params: dict[str, Any]) -> Dividends:
+    """Return the expected dividends: the trailing ones repeated 364 days later.
+
+    # shortcut: no growth and no announced schedule; replace with the issuer's
+    # declared distributions if they are available.
+    """
+    as_of = date.fromisoformat(params["as_of"])
+    pairs = [
+        (
+            (date.fromisoformat(d["ex_date"]) + timedelta(days=364) - as_of).days
+            / 365.0,
+            float(d["amount"]),
+        )
+        for d in params["dividends"]
+    ]
+    pairs = [(t, a) for t, a in sorted(pairs) if t > 0]
+    return Dividends(tuple(t for t, _ in pairs), tuple(a for _, a in pairs))
+
+
+def load_params(path: Path) -> dict[str, Any]:
+    """Read a parameter file written by ``main``."""
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def fetch_market_params(ticker: str, as_of: date) -> dict[str, Any]:

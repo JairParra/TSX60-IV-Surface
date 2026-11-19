@@ -185,6 +185,7 @@ function renderStatus() {
   badge(m.ticker); badge("as of " + m.as_of); badge("spot " + fmt(m.spot, 2));
   badge(`r ${fmt(Math.min(...zr), 2)}-${fmt(Math.max(...zr), 2)}% (${m.rate_curve.source})`);
   badge(m.exercise === "american" ? "American-exercise tree" : "European BSM");
+  if (m.exercise === "american") badge(m.dividends === "schedule" ? "discrete dividends" : "continuous dividend yield");
   if (cal.ok === true) badge("calendar: no arbitrage", "ok");
   else if (cal.ok === false) badge("calendar VIOLATED: " + cal.violations.map((v) => v.join(" to ")).join("; "), "bad");
   else badge("calendar: not checked " + (cal.note || "(one slice)"));
@@ -311,7 +312,7 @@ function drawMath(sl) {
   $("f2n").textContent = "Each OTM mid is inverted to sigma (Brent for European, bracketed Newton on the tree for American); quotes that break the no-arbitrage price bounds are dropped and counted.";
   tex("f2b", "V_{i,j}=\\max\\Bigl(\\text{payoff}_{i,j},\\;e^{-r\\Delta t}\\bigl[p\\,V_{i+1,j+1}+(1-p)\\,V_{i+1,j}\\bigr]\\Bigr),\\quad p=\\frac{e^{(r-q)\\Delta t}-d}{u-d}");
   $("f2bn").textContent = S.meta.exercise === "american"
-    ? `XIU options are American-style, so mids are inverted with this binomial tree (q from the parity forward). Early-exercise premium at the fitted vol is at most ${fmt(sl.american.max_vol_bias_pts, 2)} vol pts here.`
+    ? `XIU options are American-style, so mids are inverted with this binomial tree (anchored to the parity forward, which is first corrected for the premium of its own near-the-money quotes; dividends as ${S.meta.dividends === "schedule" ? "a discrete schedule" : "a continuous yield"}). Early-exercise premium at the fitted vol is at most ${fmt(sl.american.max_vol_bias_pts, 2)} vol pts here.`
     : `Mids were inverted with European BSM; the tree premium here would overstate vol by up to ${fmt(sl.american.max_vol_bias_pts, 2)} pts.`;
   tex("f3", "w(k)=a+b\\Bigl[\\rho\\,(k-m)+\\sqrt{(k-m)^2+\\varsigma^2}\\Bigr]");
   $("f3n").textContent = `Fitted: a = ${fmt(p.a, 5)}, b = ${fmt(p.b, 5)}, rho = ${fmt(p.rho, 4)}, m = ${fmt(p.m, 4)}, varsigma = ${fmt(p.sigma, 4)}  (${sl.n_points} quotes).`;

@@ -2,6 +2,16 @@
 
 ## Session Log
 
+## 2026-11-20 — Shortcuts hardened: discrete dividends, forward correction, bootstrap
+- **Model & Skills Used:** `sonnet` + `/ponytail:ponytail`, built-in browser (DOM checks)
+- **Completed:**
+  - `american.Dividends` and an escrowed discrete-dividend tree (`--dividends schedule|continuous`); the generator now prices with the discrete schedule, so the pipeline faces the effect it must undo. Earlier numbers were optimistic: generator and inversion shared the same continuous-yield tree.
+  - American-aware parity forward (3 passes, premium of near-ATM quotes subtracted from mids): forward error 0.33% -> 0.01% of F on the ex-date expiry. 2y par yield now bootstrapped (2.9072% vs 2.9087%, immaterial); raw yields stored in the snapshot; `--min-mid` flag; `python-dateutil` declared explicitly.
+  - Demo vs truth: ATM error mean +0.003 vol pts (max 0.07) with schedule + corrected forward; European inversion +0.27 (max 0.74); continuous yield worse than schedule (tested).
+  - `uv run pytest -v`: 100 passed. `uv run ruff check .`: clean. Light mode and phone width checked via DOM geometry and theme colors; whitepaper rebuilt.
+- **Key Decisions / Invariants:** Tried an active-set butterfly constraint for SVI speed: no gain, reverted. Real WebGL click still unverified (browser pane hidden, no input delivered).
+- **Next Step:** Click the 3D surface once in a real browser; optionally build a bootstrapped curve beyond 2y and a test-suite speedup (about 40-50 s).
+
 ## 2026-11-19 — Simulation realism: BoC curve, American exercise, SSVI demo chain
 - **Model & Skills Used:** `sonnet` + `/ponytail:ponytail`, built-in browser for UI checks
 - **Completed:**
