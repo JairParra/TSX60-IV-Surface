@@ -12,6 +12,7 @@
     --bg: #f6f7f9; --card: #ffffff; --fg: #1b2330; --muted: #5d6b7e;
     --border: #d9dee6; --accent: #2a6fdb; --ok: #1d7a46; --bad: #b3261e;
     --warn-bg: #fff3cd; --warn-fg: #664d03;
+    --h: clamp(560px, calc(100vh - 150px), 840px); /* height of the two main cards */
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -21,37 +22,51 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header, main { padding: 0 16px; max-width: 1400px; margin: 0 auto; }
-  h1 { font-size: 20px; margin: 16px 0 4px; }
-  h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600;
-       text-transform: uppercase; letter-spacing: .04em; }
-  .ribbon { background: var(--warn-bg); color: var(--warn-fg); padding: 8px 16px;
+  header, main { padding: 0 16px; max-width: 1500px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 12px 0 4px; }
+  .ribbon { background: var(--warn-bg); color: var(--warn-fg); padding: 6px 16px;
             text-align: center; font-weight: 600; }
-  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 4px 0 8px; align-items: center; }
   .badge { background: var(--card); border: 1px solid var(--border); border-radius: 999px;
            padding: 2px 10px; font-size: 12px; }
   .badge.ok { color: var(--ok); border-color: var(--ok); }
   .badge.bad { color: var(--bad); border-color: var(--bad); }
-  .grid { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); padding-bottom: 24px; }
-  @media (min-width: 960px) { .grid { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); } }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
-  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 8px; }
+  details.more { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+  details.more summary { cursor: pointer; width: max-content; }
+  details.more .badges { margin-top: 6px; }
+  .grid { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); padding-bottom: 16px; }
+  @media (min-width: 1000px) {
+    .grid { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); height: var(--h); }
+  }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+          padding: 10px 12px; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 6px; }
   label { display: inline-flex; gap: 6px; align-items: center; }
   select, button, input[type=range] { font: inherit; }
   button, select { background: var(--card); color: var(--fg); border: 1px solid var(--border);
-                   border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+                   border-radius: 6px; padding: 3px 10px; cursor: pointer; }
   button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  @media (min-width: 960px) { .sticky { position: sticky; top: 8px; align-self: start; } }
-  #surf { height: 560px; }
-  .small { height: 260px; }
+  #surf { flex: 1; min-height: 380px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 6px 0 8px; }
+  .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0; background: none; }
+  .tabs button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .tabbody { flex: 1; min-height: 0; overflow: auto; }
+  @media (max-width: 999px) { .tabbody { height: 560px; flex: none; } }
+  .pane { display: flex; flex-direction: column; gap: 6px; height: 100%; }
+  .pane .plot { flex: 1; min-height: 170px; }
+  #formulasPane { display: block; height: auto; }
   .muted { color: var(--muted); font-size: 12px; }
-  #formulas .katex-display { margin: .5em 0; overflow-x: auto; overflow-y: hidden; }
-  #formulas p { margin: .6em 0 0; }
-  #empty { display: none; padding: 24px 16px; }
+  .check { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }
+  .check b { min-width: 1.2em; }
+  .check.ok b { color: var(--ok); } .check.bad b { color: var(--bad); }
+  #formulas .katex-display { margin: .4em 0; overflow-x: auto; overflow-y: hidden; }
+  #formulas p { margin: .2em 0 .8em; }
+  #empty { display: none; padding: 24px 16px; margin-bottom: 12px; }
   code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
-  ul.plain { margin: 4px 0 0; padding-left: 18px; }
+  .hint { margin: 4px 0 0; }
 </style>
 </head>
 <body>
@@ -59,11 +74,12 @@
 <header>
   <h1>TSX60 implied-volatility surface</h1>
   <div id="badges" class="badges" aria-live="polite"></div>
+  <details class="more"><summary>Data details</summary><div id="details" class="badges"></div></details>
 </header>
 <main>
   <div id="empty" class="card" role="alert"></div>
   <div id="content" class="grid" hidden>
-    <section class="card sticky" aria-label="3D surface">
+    <section class="card" aria-label="3D surface">
       <div class="controls">
         <label>Z axis
           <select id="zMode"><option value="iv">Implied vol (%)</option>
@@ -75,30 +91,38 @@
         <button id="resetCam" type="button">Reset view</button>
       </div>
       <div id="surf" role="img" aria-label="Interactive 3D implied volatility surface"></div>
-      <p class="muted">Drag to rotate, scroll to zoom, click a quote to select its expiry.
-        The mesh joins the fitted expiries; cells outside each expiry's quoted strikes are
-        left empty rather than extrapolated. The page re-checks the file every 30 s, but the
-        numbers only change when <code>python -m tsx60_iv.surface</code> is re-run.</p>
+      <p class="muted hint">Drag to rotate, scroll to zoom, click a quote to pick its expiry (red line).
+        Empty cells are outside the quoted strikes: nothing is extrapolated.</p>
     </section>
-    <div style="display:grid;gap:16px;align-content:start">
-      <section class="card" aria-label="Slice explorer">
-        <h2>Slice explorer</h2>
-        <div class="controls">
-          <label for="slider">Expiry</label>
-          <input id="slider" type="range" min="0" max="0" value="0" aria-label="Expiry">
-          <strong id="sliceName"></strong>
-          <button id="play" type="button">Play</button>
+    <section class="card" aria-label="Selected expiry">
+      <div class="controls">
+        <label for="slider">Expiry</label>
+        <input id="slider" type="range" min="0" max="0" value="0" aria-label="Expiry">
+        <strong id="sliceName"></strong>
+        <button id="play" type="button">Play</button>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Views for the selected expiry">
+        <button type="button" role="tab" id="tab-fit" data-tab="fit" aria-selected="true">Fit</button>
+        <button type="button" role="tab" id="tab-arb" data-tab="arb" aria-selected="false">No-arbitrage</button>
+        <button type="button" role="tab" id="tab-math" data-tab="math" aria-selected="false">Math</button>
+      </div>
+      <div class="tabbody">
+        <div class="pane" id="pane-fit" role="tabpanel" aria-labelledby="tab-fit">
+          <div id="smile" class="plot"></div>
+          <div id="smiles" class="plot"></div>
         </div>
-        <div id="smile" class="small"></div>
-        <div id="smiles" class="small"></div>
-        <div id="gplot" class="small"></div>
-        <div id="term" class="small"></div>
-      </section>
-      <section class="card" aria-label="Formulas">
-        <h2>Formulas for this slice</h2>
-        <div id="formulas"></div>
-      </section>
-    </div>
+        <div class="pane" id="pane-arb" role="tabpanel" aria-labelledby="tab-arb" hidden>
+          <div id="checks"></div>
+          <div id="gplot" class="plot"></div>
+          <div id="term" class="plot"></div>
+        </div>
+        <div class="pane" id="formulasPane" role="tabpanel" aria-labelledby="tab-math" hidden>
+          <div id="formulas"></div>
+        </div>
+      </div>
+      <p class="muted hint">Arrow keys change the expiry. The page re-checks the file every 30 s;
+        numbers change only when <code>python -m tsx60_iv.surface</code> is re-run.</p>
+    </section>
   </div>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
@@ -108,8 +132,9 @@
 const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const fmt = (v, n = 4) => (v == null ? "n/a" : Number(v).toFixed(n));
-let S = null, sel = 0, lastTag = null, playTimer = null, lastClick = 0;
+let S = null, sel = 0, tab = "fit", lastTag = null, playTimer = null, lastClick = 0;
 const HIGHLIGHT = 2; // index of the selected-slice trace in the 3D plot
+const CONFIG = { responsive: true, displaylogo: false };
 
 if (typeof Plotly === "undefined" || typeof katex === "undefined") {
   showEmpty("Plotly or KaTeX could not be loaded from the CDN (jsdelivr, cdnjs). " +
@@ -119,17 +144,18 @@ if (typeof Plotly === "undefined" || typeof katex === "undefined") {
 function showEmpty(message) {
   $("empty").textContent = message;
   $("empty").style.display = "block";
-  $("content").hidden = true;
+  $("content").hidden = !S; // keep the last good data visible if a refresh fails
 }
 
 function base(extra) {
   return Object.assign({
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
-    font: { color: css("--fg"), size: 12 }, margin: { l: 56, r: 12, t: 32, b: 52 },
+    font: { color: css("--fg"), size: 12 }, margin: { l: 56, r: 12, t: 30, b: 46 },
     uirevision: "keep", showlegend: false,
   }, extra);
 }
 const axis = (title) => ({ title, gridcolor: css("--border"), zerolinecolor: css("--border") });
+const title = (text) => ({ text, font: { size: 12 } });
 
 function xOf(forward, k) { return $("xMode").value === "strike" ? forward * Math.exp(k) : k; }
 function zOf(T, iv) {
@@ -137,11 +163,11 @@ function zOf(T, iv) {
   return $("zMode").value === "iv" ? iv * 100 : iv * iv * T;
 }
 
-function badge(text, cls = "") {
+function badge(text, cls = "", target = "badges") {
   const el = document.createElement("span");
   el.className = "badge " + cls;
   el.textContent = text;
-  $("badges").appendChild(el);
+  $(target).appendChild(el);
 }
 
 function ageText(iso) {
@@ -150,25 +176,20 @@ function ageText(iso) {
 }
 
 function renderStatus() {
-  const m = S.meta;
+  const m = S.meta, d = m.dropped, cal = S.calendar;
   $("badges").replaceChildren();
-  const ribbon = $("ribbon");
-  ribbon.hidden = !m.synthetic;
-  ribbon.textContent = "SYNTHETIC DEMO: generated quotes, not market data";
-  badge(m.ticker);
-  badge("as of " + m.as_of);
-  badge("spot " + fmt(m.spot, 2));
-  badge("r " + fmt(m.rate * 100, 2) + "%");
-  badge(m.iv_points_used + " quotes used of " + m.quotes_raw);
-  const d = m.dropped;
-  badge(`dropped: ${d.below_min_mid} below ${m.min_mid} mid, ` +
-        `${d.arbitrage_bounds} arbitrage, ${d.solver_bracket} no root`);
-  badge("built " + ageText(m.generated_at));
-  const cal = S.calendar;
+  $("details").replaceChildren();
+  $("ribbon").hidden = !m.synthetic;
+  $("ribbon").textContent = "SYNTHETIC DEMO: generated quotes, not market data";
+  badge(m.ticker); badge("as of " + m.as_of); badge("spot " + fmt(m.spot, 2)); badge("r " + fmt(m.rate * 100, 2) + "%");
   if (cal.ok === true) badge("calendar: no arbitrage", "ok");
   else if (cal.ok === false) badge("calendar VIOLATED: " + cal.violations.map((v) => v.join(" to ")).join("; "), "bad");
   else badge("calendar: not checked " + (cal.note || "(one slice)"));
   S.rejected.forEach((r) => badge(`rejected ${r.expiration}: ${r.reason}`, "bad"));
+  badge(m.iv_points_used + " quotes used of " + m.quotes_raw, "", "details");
+  badge(`dropped: ${d.below_min_mid} below ${m.min_mid} mid, ${d.arbitrage_bounds} arbitrage, ${d.solver_bracket} no root`, "", "details");
+  badge("built " + ageText(m.generated_at), "", "details");
+  badge(`source ${m.source}`, "", "details");
 }
 
 function draw3d() {
@@ -189,16 +210,15 @@ function draw3d() {
   const quotes = {
     type: "scatter3d", mode: "markers", name: "quotes", x: pts.x, y: pts.y, z: pts.z,
     text: pts.text, hovertemplate: "%{text}<br>%{y} d<br>z %{z:.3f}<extra>quote</extra>",
-    marker: { size: 3, color: css("--fg"), opacity: 0.85 },
-    visible: $("showPts").checked,
+    marker: { size: 3, color: css("--fg"), opacity: 0.85 }, visible: $("showPts").checked,
   };
   const scene = {
     xaxis: axis($("xMode").value === "k" ? "log-moneyness k" : "strike K"),
     yaxis: axis("days to expiry"),
     zaxis: axis($("zMode").value === "iv" ? "implied vol (%)" : "total variance w"),
   };
-  Plotly.react("surf", [surface, quotes, highlightTrace()], base({ scene, margin: { l: 0, r: 0, t: 0, b: 0 } }),
-               { responsive: true, displaylogo: false });
+  Plotly.react("surf", [surface, quotes, highlightTrace()],
+               base({ scene, margin: { l: 0, r: 0, t: 0, b: 0 } }), CONFIG);
   $("surf").removeAllListeners?.("plotly_click");
   $("surf").on("plotly_click", (ev) => {
     // nearest fitted expiry; skip if already selected, because re-styling the
@@ -221,15 +241,10 @@ function highlightTrace() {
   };
 }
 
-function tex(id, source, display = true) {
-  katex.render(source, $(id), { displayMode: display, throwOnError: false });
-}
+function tex(id, source) { katex.render(source, $(id), { displayMode: true, throwOnError: false }); }
+const minVariance = (p) => p.a + p.b * p.sigma * Math.sqrt(1 - p.rho * p.rho);
 
-function renderSlice() {
-  const sl = S.expiries[sel], p = sl.params;
-  $("slider").value = sel;
-  $("sliceName").textContent = `${sl.expiration} (${sl.days} d)`;
-
+function drawFit(sl) {
   Plotly.react("smile", [
     { type: "scatter", mode: "markers", x: sl.k_obs, y: sl.iv_obs.map((v) => v * 100),
       customdata: sl.k_obs.map((_, j) => [sl.strike_obs[j], sl.bid_obs[j], sl.ask_obs[j]]),
@@ -237,38 +252,52 @@ function renderSlice() {
       marker: { color: css("--fg"), size: 6 } },
     { type: "scatter", mode: "lines", x: sl.k_grid, y: sl.iv.map((v) => v * 100),
       line: { color: css("--accent"), width: 2 }, hovertemplate: "k %{x:.3f}<br>IV %{y:.2f}%<extra>SVI</extra>" },
-  ], base({ title: { text: `Smile: market vs SVI (rmse ${fmt(sl.rmse_vol_pts, 2)} vol pts)`, font: { size: 12 } },
-            xaxis: axis("log-moneyness k"), yaxis: axis("IV (%)") }), { responsive: true, displaylogo: false });
-
+  ], base({ title: title(`Smile: market vs SVI (rmse ${fmt(sl.rmse_vol_pts, 2)} vol pts)`),
+            xaxis: axis("log-moneyness k"), yaxis: axis("IV (%)") }), CONFIG);
   Plotly.react("smiles", S.expiries.map((e, i) => ({
-    type: "scatter", mode: "lines", x: e.k_grid, y: e.iv.map((v) => v * 100),
-    name: e.days + " d", line: { width: i === sel ? 4 : 1.5, color: i === sel ? css("--bad") : css("--accent") },
+    type: "scatter", mode: "lines", x: e.k_grid, y: e.iv.map((v) => v * 100), name: e.days + " d",
+    line: { width: i === sel ? 4 : 1.5, color: i === sel ? css("--bad") : css("--accent") },
     opacity: i === sel ? 1 : 0.55, hovertemplate: e.days + " d<br>k %{x:.3f}<br>IV %{y:.2f}%<extra></extra>",
-  })), base({ title: { text: "All fitted expiries (selected in red)", font: { size: 12 } },
-              xaxis: axis("log-moneyness k"), yaxis: axis("IV (%)") }), { responsive: true, displaylogo: false });
+  })), base({ title: title("All fitted expiries (selected in red)"),
+              xaxis: axis("log-moneyness k"), yaxis: axis("IV (%)") }), CONFIG);
+}
 
+function drawArb(sl) {
+  const checks = [
+    [minVariance(sl.params) >= 0, `Minimum variance ${fmt(minVariance(sl.params), 6)} >= 0`],
+    [sl.min_g >= 0, `Butterfly: min g(k) = ${fmt(sl.min_g, 5)} >= 0`],
+    [S.calendar.ok, S.calendar.ok === true ? "Calendar: w never falls with maturity"
+      : S.calendar.ok === false ? "Calendar VIOLATED: " + S.calendar.violations.map((v) => v.join(" to ")).join("; ")
+      : "Calendar: needs two fitted expiries with a shared strike range"],
+  ];
+  $("checks").replaceChildren(...checks.map(([ok, text]) => {
+    const row = document.createElement("div");
+    row.className = "check " + (ok === true ? "ok" : ok === false ? "bad" : "");
+    const mark = document.createElement("b");
+    mark.textContent = ok === true ? "✓" : ok === false ? "✗" : "?";
+    const label = document.createElement("span");
+    label.textContent = text;
+    row.append(mark, label);
+    return row;
+  }));
   Plotly.react("gplot", [
     { type: "scatter", mode: "lines", x: sl.k_grid, y: sl.g, fill: "tozeroy",
       line: { color: sl.min_g >= 0 ? css("--ok") : css("--bad"), width: 2 },
       hovertemplate: "k %{x:.3f}<br>g %{y:.4f}<extra></extra>" },
-  ], base({ title: { text: "Durrleman g(k): must stay >= 0", font: { size: 12 } },
-            xaxis: axis("log-moneyness k"), yaxis: axis("g(k)") }), { responsive: true, displaylogo: false });
-
+  ], base({ title: title("Durrleman g(k): must stay >= 0"), xaxis: axis("log-moneyness k"), yaxis: axis("g(k)") }), CONFIG);
   Plotly.react("term", [
     { type: "scatter", mode: "lines+markers", x: S.expiries.map((s) => s.days), y: S.expiries.map((s) => s.atm_w),
       marker: { color: S.expiries.map((_, i) => (i === sel ? css("--bad") : css("--accent"))),
                 size: S.expiries.map((_, i) => (i === sel ? 11 : 7)) },
       line: { color: css("--accent") }, hovertemplate: "%{x} d<br>w(0) %{y:.5f}<extra></extra>" },
-  ], base({ title: { text: "ATM total variance: must not fall with maturity", font: { size: 12 } },
-            xaxis: axis("days to expiry"), yaxis: axis("w(k=0, T)") }), { responsive: true, displaylogo: false });
+  ], base({ title: title("ATM total variance: must not fall with maturity"),
+            xaxis: axis("days to expiry"), yaxis: axis("w(k=0, T)") }), CONFIG);
+}
 
-  if ($("surf").data) Plotly.restyle("surf", {
-    x: [highlightTrace().x], y: [highlightTrace().y], z: [highlightTrace().z],
-  }, [HIGHLIGHT]);
-
-  const minVar = p.a + p.b * p.sigma * Math.sqrt(1 - p.rho * p.rho);
-  const html = ["f1", "f2", "f3", "f4", "f5", "f6"].map((id) => `<div id="${id}"></div><p id="${id}n" class="muted"></p>`).join("");
-  $("formulas").innerHTML = html;
+function drawMath(sl) {
+  const p = sl.params;
+  $("formulas").innerHTML = ["f1", "f2", "f3", "f4", "f5", "f6"]
+    .map((id) => `<div id="${id}"></div><p id="${id}n" class="muted"></p>`).join("");
   tex("f1", "F(T)=\\operatorname*{median}_{3\\text{ nearest-ATM}}\\bigl[K_i+e^{rT}(C_i-P_i)\\bigr],\\quad k=\\ln\\frac{K}{F}");
   $("f1n").textContent = `Here T = ${fmt(sl.T, 4)}, F = ${fmt(sl.forward, 4)}, D = e^(-rT) = ${fmt(sl.discount, 5)}, r = ${fmt(S.meta.rate * 100, 2)}%.`;
   tex("f2", "C=D\\,[F\\,\\Phi(d_1)-K\\,\\Phi(d_2)],\\quad d_{1,2}=\\frac{-k\\pm\\tfrac12\\sigma^2T}{\\sigma\\sqrt T}");
@@ -276,7 +305,7 @@ function renderSlice() {
   tex("f3", "w(k)=a+b\\Bigl[\\rho\\,(k-m)+\\sqrt{(k-m)^2+\\varsigma^2}\\Bigr]");
   $("f3n").textContent = `Fitted: a = ${fmt(p.a, 5)}, b = ${fmt(p.b, 5)}, rho = ${fmt(p.rho, 4)}, m = ${fmt(p.m, 4)}, varsigma = ${fmt(p.sigma, 4)}  (${sl.n_points} quotes).`;
   tex("f4", "a+b\\,\\varsigma\\sqrt{1-\\rho^2}\\;\\ge\\;0");
-  $("f4n").textContent = `Minimum variance = ${fmt(minVar, 6)} ${minVar >= 0 ? "(satisfied)" : "(VIOLATED)"}.`;
+  $("f4n").textContent = `Minimum variance = ${fmt(minVariance(p), 6)} ${minVariance(p) >= 0 ? "(satisfied)" : "(VIOLATED)"}.`;
   tex("f5", "g(k)=\\Bigl(1-\\frac{k\\,w'}{2w}\\Bigr)^2-\\frac{w'^2}{4}\\Bigl(\\frac1w+\\frac14\\Bigr)+\\frac{w''}{2}\\;\\ge\\;0");
   $("f5n").textContent = `Butterfly check: min g = ${fmt(sl.min_g, 5)} ${sl.min_g >= 0 ? "(no butterfly arbitrage on the grid)" : "(VIOLATED)"}.`;
   tex("f6", "\\frac{\\partial w(k,T)}{\\partial T}\\;\\ge\\;0");
@@ -285,11 +314,37 @@ function renderSlice() {
     : "Calendar check needs at least two fitted expiries with a shared strike range.";
 }
 
+// Only the visible tab is drawn: Plotly sizes a plot from its container, which is zero while hidden.
+function renderTab() {
+  const sl = S.expiries[sel];
+  if (tab === "fit") drawFit(sl);
+  else if (tab === "arb") drawArb(sl);
+  else drawMath(sl);
+}
+
+function showTab(name) {
+  tab = name;
+  document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
+  $("pane-fit").hidden = name !== "fit";
+  $("pane-arb").hidden = name !== "arb";
+  $("formulasPane").hidden = name !== "math";
+  renderTab();
+}
+
+function renderSlice() {
+  const sl = S.expiries[sel];
+  $("slider").value = sel;
+  $("sliceName").textContent = `${sl.expiration} (${sl.days} d)`;
+  const hl = highlightTrace();
+  if ($("surf").data) Plotly.restyle("surf", { x: [hl.x], y: [hl.y], z: [hl.z] }, [HIGHLIGHT]);
+  renderTab();
+}
+
 function select(i) { sel = i; renderSlice(); }
 
 function renderAll() {
   if (!S || !S.expiries.length) {
-    if (S) { showEmpty("No expiry could be fitted. See the rejected list above."); renderStatus(); }
+    if (S) { renderStatus(); showEmpty("No expiry could be fitted. See the rejected list above."); }
     return;
   }
   $("empty").style.display = "none";
@@ -310,7 +365,7 @@ async function load() {
     }
     if (!r.ok) throw new Error("HTTP " + r.status);
     const tag = r.headers.get("ETag");
-    if (tag && tag === lastTag) { if (S) renderStatus(); return; }
+    if (tag && tag === lastTag) { if (S) { renderStatus(); $("empty").style.display = "none"; } return; }
     const data = await r.json();
     const keep = S && S.expiries[sel] ? S.expiries[sel].expiration : null;
     S = data; lastTag = tag;
@@ -318,11 +373,12 @@ async function load() {
     sel = i >= 0 ? i : 0;
     renderAll();
   } catch (err) {
-    showEmpty("Could not load the surface: " + err.message);
+    showEmpty("Could not load the surface: " + err.message + (S ? " (showing the last loaded data)" : ""));
   }
 }
 
 $("slider").addEventListener("input", (e) => select(Number(e.target.value)));
+document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => S && showTab(b.dataset.tab)));
 ["zMode", "xMode", "showPts"].forEach((id) => $(id).addEventListener("change", () => { draw3d(); renderSlice(); }));
 $("resetCam").addEventListener("click", () => Plotly.relayout("surf", { "scene.camera": null }));
 $("play").addEventListener("click", () => {
@@ -331,7 +387,7 @@ $("play").addEventListener("click", () => {
   playTimer = setInterval(() => select((sel + 1) % S.expiries.length), 1500);
 });
 document.addEventListener("keydown", (e) => {
-  if (!S || !S.expiries.length || e.target.tagName === "SELECT") return;
+  if (!S || !S.expiries.length || ["SELECT", "INPUT"].includes(e.target.tagName)) return; // inputs handle arrows natively
   if (e.key === "ArrowRight") select(Math.min(sel + 1, S.expiries.length - 1));
   if (e.key === "ArrowLeft") select(Math.max(sel - 1, 0));
 });

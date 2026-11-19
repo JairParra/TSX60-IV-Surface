@@ -49,7 +49,39 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/surface")
+@app.get(
+    "/surface",
+    responses={
+        200: {
+            "description": "Latest calibrated surface document.",
+            "headers": {
+                "ETag": {
+                    "description": (
+                        "Entity tag representing the version of the surface file."
+                    ),
+                    "schema": {"type": "string"},
+                }
+            },
+        },
+        304: {
+            "description": (
+                "Surface not modified; the client's cached version matching "
+                "If-None-Match is current."
+            ),
+            "headers": {
+                "ETag": {
+                    "description": (
+                        "Entity tag representing the version of the surface file."
+                    ),
+                    "schema": {"type": "string"},
+                }
+            },
+        },
+        503: {
+            "description": "Surface not loaded yet.",
+        },
+    },
+)
 def surface(request: Request) -> Response:
     """Return the latest surface; 304 when the client already has it."""
     data, etag = _current()
