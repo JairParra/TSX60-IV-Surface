@@ -24,6 +24,29 @@ def raw_svi_variance(
     return a + b * (rho * (x - m) + np.sqrt((x - m) ** 2 + sigma**2))
 
 
+def durrleman_g(
+    k: ArrayLike,
+    a: float,
+    b: float,
+    rho: float,
+    m: float,
+    sigma: float,
+) -> NDArray[np.float64]:
+    """Durrleman's ``g(k)``; the smile is butterfly-free where ``g >= 0``."""
+    x = np.asarray(k, dtype=float)
+    y = x - m
+    root = np.sqrt(y**2 + sigma**2)
+    variance = raw_svi_variance(x, a, b, rho, m, sigma)
+    first = b * (rho + y / root)
+    second = b * sigma**2 / root**3
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (
+            (1 - x * first / (2 * variance)) ** 2
+            - first**2 / 4 * (1 / variance + 0.25)
+            + second / 2
+        )
+
+
 def check_butterfly_arbitrage(
     k: ArrayLike,
     a: float,
@@ -33,19 +56,7 @@ def check_butterfly_arbitrage(
     sigma: float,
 ) -> NDArray[np.bool_]:
     """Check Durrleman's butterfly-arbitrage condition on a log-strike grid."""
-    x = np.asarray(k, dtype=float)
-    y = x - m
-    root = np.sqrt(y**2 + sigma**2)
-    variance = raw_svi_variance(x, a, b, rho, m, sigma)
-    first = b * (rho + y / root)
-    second = b * sigma**2 / root**3
-    with np.errstate(divide="ignore", invalid="ignore"):
-        g = (
-            (1 - x * first / (2 * variance)) ** 2
-            - first**2 / 4 * (1 / variance + 0.25)
-            + second / 2
-        )
-    return np.asarray(g >= 0)
+    return np.asarray(durrleman_g(k, a, b, rho, m, sigma) >= 0)
 
 
 def calibrate_svi_slice(
@@ -91,7 +102,7 @@ def calibrate_svi_slice(
             method="SLSQP",
             bounds=bounds,
             constraints=constraints,
-            options={"ftol": 1e-14, "maxiter": 500},
+            options={"ftol": 1e-10, "maxiter": 1000},
         )
         if fit.success and (best is None or fit.fun < best.fun):
             best = fit

@@ -72,3 +72,11 @@ def test_calendar_arbitrage_check() -> None:
     late = (1.0, (0.04, 0.1, -0.3, 0.0, 0.2))
     assert check_calendar_arbitrage(K, [late, early]).all()
     assert not check_calendar_arbitrage(K, [(0.5, late[1]), (1.0, early[1])]).any()
+
+
+def test_calibration_handles_small_short_expiry_variance() -> None:
+    """Total variance near 1e-3 (a 14-day smile) must still converge."""
+    k = np.linspace(-0.2, 0.2, 15)
+    w = raw_svi_variance(k, 0.0008, 0.004, -0.4, 0.0, 0.1)
+    fitted = calibrate_svi_slice(k, w)
+    assert np.max(np.abs(raw_svi_variance(k, *fitted) - w)) < 1e-6

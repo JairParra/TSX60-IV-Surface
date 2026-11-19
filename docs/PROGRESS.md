@@ -2,6 +2,16 @@
 
 ## Session Log
 
+## 2026-11-18 — Pipeline, API and 3D demo page
+- **Model & Skills Used:** `sonnet` + `/ponytail:ponytail`, `session-logger`, built-in browser for checks
+- **Completed:**
+  - New `surface.py` (chain, row-by-row IV, per-expiry SVI, calendar check, atomic `data/surface.json`), `synthetic.py` (generator moved out of the fixture script; fixture equality test), `static/index.html` (Plotly 3D surface, smile, Durrleman g, term structure, KaTeX formulas with live numbers, 30 s ETag polling), `api.py` serves the file (ETag/304, 503 when missing) and the page.
+  - Fixed `calibrate_svi_slice`: `ftol` 1e-14 made SLSQP hit the iteration limit on every real-looking slice; now 1e-10 / 1000 iterations. `fetch_xiu_chain` now makes one request per expiry (capped), stores spot, stops on rate limit, raises on empty.
+  - `uv run pytest -v`: 37 passed. `uv run ruff check .`: clean. Page checked in the built-in browser (no local errors, modes and keyboard work, 304 confirmed). Whitepaper and PDF updated.
+  - Follow-up fixes: clicking the 3D plot overflowed the stack (re-fired `plotly_click`); now nearest-expiry selection with a re-entrancy guard and 400 ms debounce. Total-variance view works; mesh now has 6 interpolated rows between expiries (linear in w, no extrapolation) and the page has an all-expiries smile chart. A real mouse click on the WebGL canvas could not be simulated in the test browser, so that path is covered by emitting the event.
+- **Key Decisions / Invariants:** Yahoo has no XIU.TO options (probed: 0 expirations; SPY 29, EWC 8), so the demo is synthetic and labelled. Quotes with mid < 0.05 are excluded (tick-floor noise). Rejected expiries and a failed calendar check are reported, never repaired. No `POST /refresh`; refresh is a CLI action.
+- **Next Step:** Research how to get Montreal Exchange XIU option data (free delayed quotes and terms, TMX Datalinx, broker APIs such as Interactive Brokers, vendors) and recommend one with the adapter needed.
+
 ## 2026-11-17 — SLSQP calibration and whitepaper
 - **Model & Skills Used:** `sonnet` + `/ponytail:ponytail`, `session-logger`
 - **Completed:**

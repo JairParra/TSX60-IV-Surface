@@ -5,13 +5,17 @@
 - Install: `uv sync`
 - Test: `uv run pytest`
 - Lint: `uv run ruff check .`
-- Run pipeline: `uv run python -m tsx60_iv.data`
+- Demo surface: `uv run python -m tsx60_iv.surface --demo`, then `uv run uvicorn tsx60_iv.api:app` and open `http://127.0.0.1:8000/`
+- Live fetch (explicit only): `uv run python -m tsx60_iv.surface --fetch` (Yahoo has no XIU.TO options)
 
 ## Layout
 
 - `src/tsx60_iv/data.py`: `yfinance` ingestion, quote quality, forwards/rates.
 - `src/tsx60_iv/bsm.py`: forward Black-Scholes pricing, Greeks, IV inversion.
 - `src/tsx60_iv/svi.py`: SVI parameterization, slice calibration, arbitrage checks.
+- `src/tsx60_iv/surface.py`: chain to implied vols to per-expiry SVI to `data/surface.json` (`python -m tsx60_iv.surface --demo`).
+- `src/tsx60_iv/synthetic.py`: synthetic chain behind the fixture and the demo.
+- `src/tsx60_iv/static/index.html`: 3D surface page served by the API at `/`.
 - `src/tsx60_iv/tracking.py`: MLflow logging interface.
 - `src/tsx60_iv/api.py`: FastAPI surface-serving interface.
 - `tests/`: deterministic unit and property tests.

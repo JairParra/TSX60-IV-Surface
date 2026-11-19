@@ -108,15 +108,32 @@ uv run pytest
 uv run ruff check .
 ```
 
-Generate the offline fixture, or fetch and cache a live `XIU.TO` chain:
+### See the surface (offline demo)
 
 ```bash
-uv run python tests/fixtures/generate_xiu_sample.py
-uv run python -m tsx60_iv.data
+uv run python -m tsx60_iv.surface --demo
+uv run uvicorn tsx60_iv.api:app --port 8000
 ```
 
-The live command writes `data/xiu_chain.parquet`; normal CI never performs a
-network request.
+Open <http://127.0.0.1:8000/> for the interactive 3D surface, smile, Durrleman
+`g(k)` and term-structure plots, with the formulas filled in for the selected
+expiry. The demo uses a built-in synthetic chain and the page says so. Re-run
+the first command to refresh; the page re-checks the file every 30 s and never
+contacts Yahoo.
+
+### Live data
+
+Yahoo Finance returns no options for `XIU.TO` (it does not carry Montreal
+Exchange options), so there is no live XIU source yet. For a Yahoo-listed
+ticker, a live download is explicit and limited to one request per expiry:
+
+```bash
+uv run python -m tsx60_iv.surface --fetch --ticker EWC --rate 0.043 --max-expiries 6
+```
+
+Regenerate the offline test fixture with
+`uv run python tests/fixtures/generate_xiu_sample.py`. Normal CI never performs
+a network request.
 
 ## Development Invariants
 

@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TSX60 IV Surface</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --card: #ffffff; --fg: #1b2330; --muted: #5d6b7e;
+    --border: #d9dee6; --accent: #2a6fdb; --ok: #1d7a46; --bad: #b3261e;
+    --warn-bg: #fff3cd; --warn-fg: #664d03;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f141b; --card: #171e28; --fg: #e6ebf2; --muted: #96a3b6;
+      --border: #2b3544; --accent: #6aa3ff; --ok: #4cc38a; --bad: #ff8a80;
+      --warn-bg: #4a3b0a; --warn-fg: #ffe69c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header, main { padding: 0 16px; max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 16px 0 4px; }
+  h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600;
+       text-transform: uppercase; letter-spacing: .04em; }
+  .ribbon { background: var(--warn-bg); color: var(--warn-fg); padding: 8px 16px;
+            text-align: center; font-weight: 600; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+  .badge { background: var(--card); border: 1px solid var(--border); border-radius: 999px;
+           padding: 2px 10px; font-size: 12px; }
+  .badge.ok { color: var(--ok); border-color: var(--ok); }
+  .badge.bad { color: var(--bad); border-color: var(--bad); }
+  .grid { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); padding-bottom: 24px; }
+  @media (min-width: 960px) { .grid { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); } }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 8px; }
+  label { display: inline-flex; gap: 6px; align-items: center; }
+  select, button, input[type=range] { font: inherit; }
+  button, select { background: var(--card); color: var(--fg); border: 1px solid var(--border);
+                   border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (min-width: 960px) { .sticky { position: sticky; top: 8px; align-self: start; } }
+  #surf { height: 560px; }
+  .small { height: 260px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  #formulas .katex-display { margin: .5em 0; overflow-x: auto; overflow-y: hidden; }
+  #formulas p { margin: .6em 0 0; }
+  #empty { display: none; padding: 24px 16px; }
+  code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+  ul.plain { margin: 4px 0 0; padding-left: 18px; }
+</style>
+</head>
+<body>
+<div id="ribbon" class="ribbon" hidden></div>
+<header>
+  <h1>TSX60 implied-volatility surface</h1>
+  <div id="badges" class="badges" aria-live="polite"></div>
+</header>
+<main>
+  <div id="empty" class="card" role="alert"></div>
+  <div id="content" class="grid" hidden>
+    <section class="card sticky" aria-label="3D surface">
+      <div class="controls">
+        <label>Z axis
+          <select id="zMode"><option value="iv">Implied vol (%)</option>
+            <option value="w">Total variance w</option></select></label>
+        <label>X axis
+          <select id="xMode"><option value="k">Log-moneyness k</option>
+            <option value="strike">Strike K</option></select></label>
+        <label><input type="checkbox" id="showPts" checked> Market quotes</label>
+        <button id="resetCam" type="button">Reset view</button>
+      </div>
+      <div id="surf" role="img" aria-label="Interactive 3D implied volatility surface"></div>
+      <p class="muted">Drag to rotate, scroll to zoom, click a quote to select its expiry.
+        The mesh joins the fitted expiries; cells outside each expiry's quoted strikes are
+        left empty rather than extrapolated. The page re-checks the file every 30 s, but the
+        numbers only change when <code>python -m tsx60_iv.surface</code> is re-run.</p>
+    </section>
+    <div style="display:grid;gap:16px;align-content:start">
+      <section class="card" aria-label="Slice explorer">
+        <h2>Slice explorer</h2>
+        <div class="controls">
+          <label for="slider">Expiry</label>
+          <input id="slider" type="range" min="0" max="0" value="0" aria-label="Expiry">
+          <strong id="sliceName"></strong>
+          <button id="play" type="button">Play</button>
+        </div>
+        <div id="smile" class="small"></div>
+        <div id="smiles" class="small"></div>
+        <div id="gplot" class="small"></div>
+        <div id="term" class="small"></div>
+      </section>
+      <section class="card" aria-label="Formulas">
+        <h2>Formulas for this slice</h2>
+        <div id="formulas"></div>
+      </section>
+    </div>
+  </div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const fmt = (v, n = 4) => (v == null ? "n/a" : Number(v).toFixed(n));
+let S = null, sel = 0, lastTag = null, playTimer = null, lastClick = 0;
+const HIGHLIGHT = 2; // index of the selected-slice trace in the 3D plot
+
+if (typeof Plotly === "undefined" || typeof katex === "undefined") {
+  showEmpty("Plotly or KaTeX could not be loaded from the CDN (jsdelivr, cdnjs). " +
+            "Check your internet connection and reload.");
+}
+
+function showEmpty(message) {
+  $("empty").textContent = message;
+  $("empty").style.display = "block";
+  $("content").hidden = true;
+}
+
+function base(extra) {
+  return Object.assign({
+    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+    font: { color: css("--fg"), size: 12 }, margin: { l: 56, r: 12, t: 32, b: 52 },
+    uirevision: "keep", showlegend: false,
+  }, extra);
+}
+const axis = (title) => ({ title, gridcolor: css("--border"), zerolinecolor: css("--border") });
+
+function xOf(forward, k) { return $("xMode").value === "strike" ? forward * Math.exp(k) : k; }
+function zOf(T, iv) {
+  if (iv == null) return null;
+  return $("zMode").value === "iv" ? iv * 100 : iv * iv * T;
+}
+
+function badge(text, cls = "") {
+  const el = document.createElement("span");
+  el.className = "badge " + cls;
+  el.textContent = text;
+  $("badges").appendChild(el);
+}
+
+function ageText(iso) {
+  const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
+  return minutes < 1 ? "just now" : minutes + " min ago";
+}
+
+function renderStatus() {
+  const m = S.meta;
+  $("badges").replaceChildren();
+  const ribbon = $("ribbon");
+  ribbon.hidden = !m.synthetic;
+  ribbon.textContent = "SYNTHETIC DEMO: generated quotes, not market data";
+  badge(m.ticker);
+  badge("as of " + m.as_of);
+  badge("spot " + fmt(m.spot, 2));
+  badge("r " + fmt(m.rate * 100, 2) + "%");
+  badge(m.iv_points_used + " quotes used of " + m.quotes_raw);
+  const d = m.dropped;
+  badge(`dropped: ${d.below_min_mid} below ${m.min_mid} mid, ` +
+        `${d.arbitrage_bounds} arbitrage, ${d.solver_bracket} no root`);
+  badge("built " + ageText(m.generated_at));
+  const cal = S.calendar;
+  if (cal.ok === true) badge("calendar: no arbitrage", "ok");
+  else if (cal.ok === false) badge("calendar VIOLATED: " + cal.violations.map((v) => v.join(" to ")).join("; "), "bad");
+  else badge("calendar: not checked " + (cal.note || "(one slice)"));
+  S.rejected.forEach((r) => badge(`rejected ${r.expiration}: ${r.reason}`, "bad"));
+}
+
+function draw3d() {
+  const g = S.grid, ex = S.expiries;
+  const surface = {
+    type: "surface", name: "SVI fit", showscale: true, colorscale: "Viridis", opacity: 0.93,
+    x: g.iv.map((_, i) => g.k.map((k) => xOf(g.forward[i], k))),
+    y: g.iv.map((_, i) => g.k.map(() => g.days[i])),
+    z: g.iv.map((row, i) => row.map((v) => zOf(g.T[i], v))),
+    colorbar: { thickness: 12, len: 0.6, tickfont: { color: css("--fg") } },
+    hovertemplate: "x %{x:.3f}<br>%{y:.0f} d<br>z %{z:.4f}<extra>surface</extra>",
+  };
+  const pts = { x: [], y: [], z: [], text: [] };
+  ex.forEach((sl) => sl.k_obs.forEach((k, j) => {
+    pts.x.push(xOf(sl.forward, k)); pts.y.push(sl.days); pts.z.push(zOf(sl.T, sl.iv_obs[j]));
+    pts.text.push(`K ${fmt(sl.strike_obs[j], 2)}  bid ${fmt(sl.bid_obs[j], 2)}  ask ${fmt(sl.ask_obs[j], 2)}`);
+  }));
+  const quotes = {
+    type: "scatter3d", mode: "markers", name: "quotes", x: pts.x, y: pts.y, z: pts.z,
+    text: pts.text, hovertemplate: "%{text}<br>%{y} d<br>z %{z:.3f}<extra>quote</extra>",
+    marker: { size: 3, color: css("--fg"), opacity: 0.85 },
+    visible: $("showPts").checked,
+  };
+  const scene = {
+    xaxis: axis($("xMode").value === "k" ? "log-moneyness k" : "strike K"),
+    yaxis: axis("days to expiry"),
+    zaxis: axis($("zMode").value === "iv" ? "implied vol (%)" : "total variance w"),
+  };
+  Plotly.react("surf", [surface, quotes, highlightTrace()], base({ scene, margin: { l: 0, r: 0, t: 0, b: 0 } }),
+               { responsive: true, displaylogo: false });
+  $("surf").removeAllListeners?.("plotly_click");
+  $("surf").on("plotly_click", (ev) => {
+    // nearest fitted expiry; skip if already selected, because re-styling the
+    // 3D plot inside a click can re-fire the click and recurse forever
+    if (performance.now() - lastClick < 400) return;
+    lastClick = performance.now();
+    const days = ev.points[0].y;
+    const i = S.expiries.reduce((best, sl, j) =>
+      (Math.abs(sl.days - days) < Math.abs(S.expiries[best].days - days) ? j : best), 0);
+    if (i !== sel) setTimeout(() => select(i), 0);
+  });
+}
+
+function highlightTrace() {
+  const sl = S.expiries[sel];
+  return {
+    type: "scatter3d", mode: "lines", name: "selected", hoverinfo: "skip",
+    x: sl.k_grid.map((k) => xOf(sl.forward, k)), y: sl.k_grid.map(() => sl.days),
+    z: sl.iv.map((v) => zOf(sl.T, v)), line: { width: 6, color: css("--bad") },
+  };
+}
+
+function tex(id, source, display = true) {
+  katex.render(source, $(id), { displayMode: display, throwOnError: false });
+}
+
+function renderSlice() {
+  const sl = S.expiries[sel], p = sl.params;
+  $("slider").value = sel;
+  $("sliceName").textContent = `${sl.expiration} (${sl.days} d)`;
+
+  Plotly.react("smile", [
+    { type: "scatter", mode: "markers", x: sl.k_obs, y: sl.iv_obs.map((v) => v * 100),
+      customdata: sl.k_obs.map((_, j) => [sl.strike_obs[j], sl.bid_obs[j], sl.ask_obs[j]]),
+      hovertemplate: "k %{x:.3f}<br>IV %{y:.2f}%<br>K %{customdata[0]:.2f}  bid %{customdata[1]:.2f}  ask %{customdata[2]:.2f}<extra>quote</extra>",
+      marker: { color: css("--fg"), size: 6 } },
+    { type: "scatter", mode: "lines", x: sl.k_grid, y: sl.iv.map((v) => v * 100),
+      line: { color: css("--accent"), width: 2 }, hovertemplate: "k %{x:.3f}<br>IV %{y:.2f}%<extra>SVI</extra>" },
+  ], base({ title: { text: `Smile: market vs SVI (rmse ${fmt(sl.rmse_vol_pts, 2)} vol pts)`, font: { size: 12 } },
+            xaxis: axis("log-moneyness k"), yaxis: axis("IV (%)") }), { responsive: true, displaylogo: false });
+
+  Plotly.react("smiles", S.expiries.map((e, i) => ({
+    type: "scatter", mode: "lines", x: e.k_grid, y: e.iv.map((v) => v * 100),
+    name: e.days + " d", line: { width: i === sel ? 4 : 1.5, color: i === sel ? css("--bad") : css("--accent") },
+    opacity: i === sel ? 1 : 0.55, hovertemplate: e.days + " d<br>k %{x:.3f}<br>IV %{y:.2f}%<extra></extra>",
+  })), base({ title: { text: "All fitted expiries (selected in red)", font: { size: 12 } },
+              xaxis: axis("log-moneyness k"), yaxis: axis("IV (%)") }), { responsive: true, displaylogo: false });
+
+  Plotly.react("gplot", [
+    { type: "scatter", mode: "lines", x: sl.k_grid, y: sl.g, fill: "tozeroy",
+      line: { color: sl.min_g >= 0 ? css("--ok") : css("--bad"), width: 2 },
+      hovertemplate: "k %{x:.3f}<br>g %{y:.4f}<extra></extra>" },
+  ], base({ title: { text: "Durrleman g(k): must stay >= 0", font: { size: 12 } },
+            xaxis: axis("log-moneyness k"), yaxis: axis("g(k)") }), { responsive: true, displaylogo: false });
+
+  Plotly.react("term", [
+    { type: "scatter", mode: "lines+markers", x: S.expiries.map((s) => s.days), y: S.expiries.map((s) => s.atm_w),
+      marker: { color: S.expiries.map((_, i) => (i === sel ? css("--bad") : css("--accent"))),
+                size: S.expiries.map((_, i) => (i === sel ? 11 : 7)) },
+      line: { color: css("--accent") }, hovertemplate: "%{x} d<br>w(0) %{y:.5f}<extra></extra>" },
+  ], base({ title: { text: "ATM total variance: must not fall with maturity", font: { size: 12 } },
+            xaxis: axis("days to expiry"), yaxis: axis("w(k=0, T)") }), { responsive: true, displaylogo: false });
+
+  if ($("surf").data) Plotly.restyle("surf", {
+    x: [highlightTrace().x], y: [highlightTrace().y], z: [highlightTrace().z],
+  }, [HIGHLIGHT]);
+
+  const minVar = p.a + p.b * p.sigma * Math.sqrt(1 - p.rho * p.rho);
+  const html = ["f1", "f2", "f3", "f4", "f5", "f6"].map((id) => `<div id="${id}"></div><p id="${id}n" class="muted"></p>`).join("");
+  $("formulas").innerHTML = html;
+  tex("f1", "F(T)=\\operatorname*{median}_{3\\text{ nearest-ATM}}\\bigl[K_i+e^{rT}(C_i-P_i)\\bigr],\\quad k=\\ln\\frac{K}{F}");
+  $("f1n").textContent = `Here T = ${fmt(sl.T, 4)}, F = ${fmt(sl.forward, 4)}, D = e^(-rT) = ${fmt(sl.discount, 5)}, r = ${fmt(S.meta.rate * 100, 2)}%.`;
+  tex("f2", "C=D\\,[F\\,\\Phi(d_1)-K\\,\\Phi(d_2)],\\quad d_{1,2}=\\frac{-k\\pm\\tfrac12\\sigma^2T}{\\sigma\\sqrt T}");
+  $("f2n").textContent = "Each OTM mid is inverted to sigma with Brent's method; quotes that break the no-arbitrage price bounds are dropped and counted.";
+  tex("f3", "w(k)=a+b\\Bigl[\\rho\\,(k-m)+\\sqrt{(k-m)^2+\\varsigma^2}\\Bigr]");
+  $("f3n").textContent = `Fitted: a = ${fmt(p.a, 5)}, b = ${fmt(p.b, 5)}, rho = ${fmt(p.rho, 4)}, m = ${fmt(p.m, 4)}, varsigma = ${fmt(p.sigma, 4)}  (${sl.n_points} quotes).`;
+  tex("f4", "a+b\\,\\varsigma\\sqrt{1-\\rho^2}\\;\\ge\\;0");
+  $("f4n").textContent = `Minimum variance = ${fmt(minVar, 6)} ${minVar >= 0 ? "(satisfied)" : "(VIOLATED)"}.`;
+  tex("f5", "g(k)=\\Bigl(1-\\frac{k\\,w'}{2w}\\Bigr)^2-\\frac{w'^2}{4}\\Bigl(\\frac1w+\\frac14\\Bigr)+\\frac{w''}{2}\\;\\ge\\;0");
+  $("f5n").textContent = `Butterfly check: min g = ${fmt(sl.min_g, 5)} ${sl.min_g >= 0 ? "(no butterfly arbitrage on the grid)" : "(VIOLATED)"}.`;
+  tex("f6", "\\frac{\\partial w(k,T)}{\\partial T}\\;\\ge\\;0");
+  $("f6n").textContent = S.calendar.ok === true ? "Calendar check across all fitted expiries: passed."
+    : S.calendar.ok === false ? "Calendar check: VIOLATED for " + S.calendar.violations.map((v) => v.join(" to ")).join("; ") + "."
+    : "Calendar check needs at least two fitted expiries with a shared strike range.";
+}
+
+function select(i) { sel = i; renderSlice(); }
+
+function renderAll() {
+  if (!S || !S.expiries.length) {
+    if (S) { showEmpty("No expiry could be fitted. See the rejected list above."); renderStatus(); }
+    return;
+  }
+  $("empty").style.display = "none";
+  $("content").hidden = false;
+  sel = Math.min(sel, S.expiries.length - 1);
+  $("slider").max = S.expiries.length - 1;
+  renderStatus();
+  draw3d();
+  renderSlice();
+}
+
+async function load() {
+  try {
+    const r = await fetch("/surface", { cache: "no-cache" });
+    if (r.status === 503) {
+      showEmpty("No surface file yet. Run: uv run python -m tsx60_iv.surface --demo");
+      return;
+    }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const tag = r.headers.get("ETag");
+    if (tag && tag === lastTag) { if (S) renderStatus(); return; }
+    const data = await r.json();
+    const keep = S && S.expiries[sel] ? S.expiries[sel].expiration : null;
+    S = data; lastTag = tag;
+    const i = keep ? S.expiries.findIndex((s) => s.expiration === keep) : -1;
+    sel = i >= 0 ? i : 0;
+    renderAll();
+  } catch (err) {
+    showEmpty("Could not load the surface: " + err.message);
+  }
+}
+
+$("slider").addEventListener("input", (e) => select(Number(e.target.value)));
+["zMode", "xMode", "showPts"].forEach((id) => $(id).addEventListener("change", () => { draw3d(); renderSlice(); }));
+$("resetCam").addEventListener("click", () => Plotly.relayout("surf", { "scene.camera": null }));
+$("play").addEventListener("click", () => {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; $("play").textContent = "Play"; return; }
+  $("play").textContent = "Pause";
+  playTimer = setInterval(() => select((sel + 1) % S.expiries.length), 1500);
+});
+document.addEventListener("keydown", (e) => {
+  if (!S || !S.expiries.length || e.target.tagName === "SELECT") return;
+  if (e.key === "ArrowRight") select(Math.min(sel + 1, S.expiries.length - 1));
+  if (e.key === "ArrowLeft") select(Math.max(sel - 1, 0));
+});
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => S && renderAll());
+setInterval(() => { if (!document.hidden) load(); }, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+load();
+</script>
+</body>
+</html>

@@ -16,20 +16,22 @@
 \section{System status and provenance}
 
 \begin{itemize}
-  \item \textbf{Implemented core:} \texttt{data.py} (quote filtering, forwards),
-        \texttt{bsm.py} (pricing, Greeks, implied volatility) and
-        \texttt{svi.py} (Raw SVI, calibration, arbitrage checks). Each has
-        offline tests.
-  \item \textbf{Interfaces only:} \texttt{tracking.py} (an MLflow logging call)
-        and \texttt{api.py} (a FastAPI app that serves an in-memory surface,
-        returning 503 until one is set). Nothing in the repository yet connects
-        the core modules to either of them, and neither is exercised against a
-        fitted surface.
-  \item \textbf{Data:} every numerical test uses
-        \texttt{tests/fixtures/\allowbreak xiu\_\allowbreak sample\_\allowbreak chain.parquet}, a
-        \emph{synthetic offline fixture}. It contains no live market quotes.
-        Live downloads happen only when \texttt{fetch\_\allowbreak xiu\_\allowbreak chain} is called
-        explicitly.
+  \item \textbf{Implemented:} \texttt{data.py} (quote filtering, forwards),
+        \texttt{bsm.py} (pricing, Greeks, implied volatility),
+        \texttt{svi.py} (Raw SVI, calibration, arbitrage checks),
+        \texttt{surface.py} (the pipeline below, writing \texttt{surface.json})
+        and \texttt{api.py} (serves that file and an interactive 3D page).
+        Each has offline tests.
+  \item \textbf{Optional:} \texttt{tracking.py} (an MLflow logging call) runs
+        only with the \texttt{--mlflow} flag and is not covered by tests.
+  \item \textbf{Data:} Yahoo Finance returns no options for \texttt{XIU.TO}, so
+        there is no live XIU source yet. Every result here comes from a
+        \emph{synthetic} chain (\texttt{synthetic.py}, also the source of the
+        offline test fixture
+        \texttt{tests/fixtures/\allowbreak xiu\_\allowbreak sample\_\allowbreak chain.parquet}).
+        It contains no market quotes, and the page labels it as a synthetic
+        demo. A live download for a Yahoo-listed ticker happens only with an
+        explicit \texttt{--fetch}, at one request per expiry.
 \end{itemize}
 
 \section{Algorithm}
@@ -42,18 +44,24 @@
         drop expiries with $T\le 0$.
   \item Estimate $F(T)$ by put-call parity (Section~\ref{sec:forward}); drop
         expiries with no call/put pair.
-  \item Compute $k=\ln(K/F(T))$.
-  \item Invert BSM prices to $\sigma$ with Brent's method
-        (Section~\ref{sec:iv}); convert to $w=\sigma^2T$.
-  \item Fit Raw SVI per expiry by constrained multi-start SLSQP
-        (Section~\ref{sec:svi}); reject the slice if it has butterfly
-        arbitrage.
+  \item Compute $k=\ln(K/F(T))$; keep out-of-the-money quotes (puts for
+        $K<F$, calls for $K\ge F$) with mid $\ge 0.05$.
+  \item Invert each mid to $\sigma$ with Brent's method, one row at a time
+        (Section~\ref{sec:iv}); count and skip rows that fail; set
+        $w=\sigma^2T$.
+  \item Fit Raw SVI per expiry (at least 5 points) by constrained multi-start
+        SLSQP (Section~\ref{sec:svi}); list the expiry as rejected if the fit
+        fails or has butterfly arbitrage.
   \item Check $\partial_T w(k,T)\ge 0$ across adjacent expiries.
 \end{enumerate}
 \end{tcolorbox}
 
-Steps 1--4 and the per-slice parts of steps 5--6 are implemented as separate
-functions; the code does not yet chain them into one call.
+\texttt{surface.py} runs these steps and reports, but never repairs, skipped
+quotes, rejected expiries and a failed calendar check. The 3D mesh shows the
+fitted expiries plus six rows between each pair, where total variance is
+linear in $T$ at fixed $k$ (this preserves calendar monotonicity). Cells
+outside the quoted strikes of the neighbouring expiries are left empty, not
+extrapolated.
 
 \section{Forward estimation}\label{sec:forward}
 
@@ -130,7 +138,7 @@ with $a$ and $m$ free, and the nonlinear inequality constraint
 \end{equation}
 (nonnegative minimum variance). The solver is
 \texttt{scipy.optimize.minimize(method="SLSQP")} with
-\texttt{ftol}$=10^{-14}$ and at most 500 iterations. SLSQP handles the bounds
+\texttt{ftol}$=10^{-10}$ and at most 1000 iterations. SLSQP handles the bounds
 and the inequality together; L-BFGS-B is not used. It is run from three starting
 points, $\rho_0\in\{-0.5,0,0.5\}$, with $a_0=\tfrac12\min w$,
 $b_0=\max(\mathrm{range}(w)/\mathrm{range}(k),10^{-3})$, $m_0=\arg\min w$ and
