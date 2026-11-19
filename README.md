@@ -4,6 +4,8 @@ A production-oriented Python library for modeling, calibrating, and serving the
 implied volatility surface of the Canadian S&P/TSX 60 Index through liquid
 `XIU.TO` (iShares S&P/TSX 60 Index ETF) option chains.
 
+![](/img/surface_synthetic.png)
+
 ## Project Overview & Architecture
 
 The package is intentionally small: data ingestion produces normalized quotes;

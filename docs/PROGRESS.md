@@ -2,6 +2,13 @@
 
 ## Session Log
 
+## 2026-11-19 — Repository documentation and OpenAPI 304 response
+- **Completed:**
+  - Authored comprehensive architectural and functional documentation in `docs/README.md`.
+  - Added explicit OpenAPI / Swagger response documentation for HTTP 200, 304 (Not Modified with ETag), and 503 on `GET /surface` in `src/tsx60_iv/api.py`.
+  - Added unit test `test_surface_openapi_schema_documents_304` to `tests/test_api.py`.
+  - `uv run pytest`: 39 passed. `uv run ruff check .`: clean.
+
 ## 2026-11-18 — Pipeline, API and 3D demo page
 - **Model & Skills Used:** `sonnet` + `/ponytail:ponytail`, `session-logger`, built-in browser for checks
 - **Completed:**

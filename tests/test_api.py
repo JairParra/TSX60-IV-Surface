@@ -45,3 +45,12 @@ def test_page_uses_pinned_cdn_libraries(client: TestClient) -> None:
     html = client.get("/").text
     assert "plotly.js-dist-min@2.35.2" in html
     assert "KaTeX/0.16.9" in html
+
+
+def test_surface_openapi_schema_documents_304(client: TestClient) -> None:
+    """OpenAPI schema documents the 304 Not Modified response."""
+    schema = client.get("/openapi.json").json()
+    responses = schema["paths"]["/surface"]["get"]["responses"]
+    assert "304" in responses
+    assert "ETag" in responses["304"]["headers"]
+
