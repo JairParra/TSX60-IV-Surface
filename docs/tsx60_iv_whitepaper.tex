@@ -350,17 +350,23 @@ holding is always worth more than exercising, because exercising forfeits both
 the interest on $K$ and the optionality. \hfill$\square$
 
 Two things break this. For a \emph{put}, a deep in-the-money option can be worth
-exercising to earn interest on the strike. For a \emph{call}, an imminent
+exercising to earn interest on the strike, but only while the interest rate
+exceeds the dividend yield, since the dividends the put holder forgoes by
+holding the stock work against exercise. For a \emph{call}, an imminent
 dividend lowers the price on the ex-date, so it can pay to exercise just
-\emph{before} it. Figure~\ref{fig:premium} shows both effects.
+\emph{before} it. Figure~\ref{fig:premium} shows both effects. For \texttt{XIU},
+whose dividend yield (about 3\%) is close to the rate, put exercise is rarely
+optimal and the calls just before ex-dividend dates dominate; this is what the
+results in Section~\ref{sec:results} show.
 
 \begin{figure}[ht]
 \centering
 \input{generated/fig_premium.tex}
 \caption{Early-exercise premium by strike ($S=37.70$, $T=0.31$, $\sigma=14\%$,
-$r=3\%$; a 0.60 CAD dividend 0.30 years out). Puts gain value as they go deep in
-the money. A call has a negligible premium if the dividend is smoothed into a
-yield, but a visible one if it is a discrete payment just before expiry.}
+$r=3\%$). The put is on an underlying without dividends: its premium grows as it
+goes deep in the money. The calls carry a 0.60 CAD dividend 0.30 years out; the
+premium is modest if the dividend is smoothed into a yield, but larger if it is a
+discrete payment just before expiry.}
 \label{fig:premium}
 \end{figure}
 
@@ -777,7 +783,7 @@ valuation date 2 January 2025, spot $S=37.70$).
 
 \subsection{The raw quotes}
 
-Table below shows the strikes around the money. Each row is a strike; the left
+The table below shows the strikes around the money. Each row is a strike; the left
 block is the call and the right block the put. A star marks a quote the filter
 removes: zero bid, or a relative spread above 35\%.
 
@@ -822,9 +828,10 @@ to 0.4 points and always on the high side.
 \begin{figure}[ht]
 \centering
 \input{generated/fig_smile.tex}
-\caption{The 21 March smile. The inverted quotes (dots) are noisy at the level of
-a hundredth of a vol point; the SVI fit (blue) is indistinguishable from the true
-surface (dashed gray) on the quoted range.}
+\caption{The 21 March smile. The inverted quotes (dots) scatter around the
+true surface (dashed gray) by a few tenths of a vol point; the SVI fit (blue)
+follows the true surface closely over the quoted range and drifts a little in
+the right wing.}
 \end{figure}
 
 \begin{center}
@@ -875,7 +882,7 @@ so it cannot drift from the library.
 
 \section{Results}\label{sec:results}
 
-Against the known generating surface (12 of 13 expiries fit):
+Against the known generating surface (the first column counts the fitted expiries out of 13):
 
 \input{generated/results_table.tex}
 

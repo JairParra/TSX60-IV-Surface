@@ -164,13 +164,14 @@ w = (table.iv_american.to_numpy() / 100) ** 2 * T      # total variance
 params = calibrate_svi_slice(k, w)
 names = ["a", "b", "rho", "m", "sigma"]
 print({n: round(float(v), 5) for n, v in zip(names, params)})
-grid = np.linspace(k.min() - 0.1, k.max() + 0.1, 200)
+pad = 0.1 * np.ptp(k)
+grid = np.linspace(k.min() - pad, k.max() + pad, 81)
 print("min g on the grid:", round(float(durrleman_g(grid, *params).min()), 3))
 \end{verbatim}
 \vspace{-0.6em}
 \begin{verbatim}
 {'a': -0.00224, 'b': 0.015, 'rho': -0.71255, 'm': 0.14469, 'sigma': 0.21238}
-min g on the grid: 0.457
+min g on the grid: 0.573
 \end{verbatim}
 }
 

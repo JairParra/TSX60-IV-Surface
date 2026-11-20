@@ -210,7 +210,8 @@ w = (table.iv_american.to_numpy() / 100) ** 2 * T      # total variance
 params = calibrate_svi_slice(k, w)
 names = ["a", "b", "rho", "m", "sigma"]
 print({n: round(float(v), 5) for n, v in zip(names, params)})
-grid = np.linspace(k.min() - 0.1, k.max() + 0.1, 200)
+pad = 0.1 * np.ptp(k)
+grid = np.linspace(k.min() - pad, k.max() + pad, 81)
 print("min g on the grid:", round(float(durrleman_g(grid, *params).min()), 3))""",
     ),
     (
@@ -387,11 +388,11 @@ def figures(ns: dict[str, Any]) -> None:
     divs = Dividends((0.30,), (0.6,))
     q = -np.log(1 - divs.pv(0.0, r, T) / spot) / T
     strikes = np.linspace(30, 45, 61)
-    put = american_price(spot, strikes, T, r, q, vol, "put") - european_tree_price(spot, strikes, T, r, q, vol, "put")
+    put = american_price(spot, strikes, T, r, 0.0, vol, "put") - european_tree_price(spot, strikes, T, r, 0.0, vol, "put")
     call_c = american_price(spot, strikes, T, r, q, vol, "call") - european_tree_price(spot, strikes, T, r, q, vol, "call")
     call_d = american_price(spot, strikes, T, r, q, vol, "call", dividends=divs) - european_tree_price(spot, strikes, T, r, q, vol, "call", dividends=divs)
     series = [
-        {"kind": "line", "x": strikes, "y": put, "color": "blue", "label": "put"},
+        {"kind": "line", "x": strikes, "y": put, "color": "blue", "label": "put, no dividends"},
         {"kind": "line", "x": strikes, "y": call_c, "color": "gray", "style": "thick,dashed", "label": "call, continuous yield"},
         {"kind": "line", "x": strikes, "y": call_d, "color": "red", "label": "call, discrete dividend"},
     ]
@@ -417,7 +418,7 @@ def results(ns: dict[str, Any]) -> None:
             errors.append(100 * (np.sqrt(s["atm_w"] / s["T"]) - float(DEFAULT_SURFACE.vol(0.0, s["T"]))))
             worst.append(100 * float(np.max(np.abs(np.array(s["iv_obs"]) - truth))))
         errors = np.array(errors)
-        rows.append([label, str(len(surface["expiries"])), tex_num(errors.mean(), 3), f"{np.abs(errors).max():.2f}", f"{max(worst):.2f}"])
+        rows.append([label, str(len(surface["expiries"])), f"{errors.mean():+.3f}", f"{np.abs(errors).max():.2f}", f"{max(worst):.2f}"])
         numbers.append((label, errors.mean(), np.abs(errors).max(), max(worst)))
     header = ["variant", "expiries fitted", "mean ATM error", "worst ATM error", "worst quote error"]
     write("results_table.tex", r"\begin{center}\footnotesize" "\n" + tabular(header, rows, "|l|r|r|r|r|") + r"\end{center}" "\n")

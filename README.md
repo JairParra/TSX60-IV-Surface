@@ -66,7 +66,7 @@ correct model for the instrument.
 | Forward | raw put-call parity | parity **corrected** for early exercise (3 passes) |
 | Extra inputs | none | implied yield $q$, optionally a dividend schedule |
 | Time on the demo | about 5 s | about 10 s |
-| Bias vs the true surface (ATM, mean) | **+0.27 vol points** (worst 0.74) | **+0.003 vol points** (worst 0.07) |
+| Bias vs the true surface (ATM, mean) | **+0.27 vol points** (worst 0.73) | **+0.003 vol points** (worst 0.07) |
 | Use it for | speed, and to measure how much early exercise matters | everything else |
 
 Why they differ. An American option is worth at least a European one,
@@ -306,8 +306,8 @@ has too few usable quotes and is listed as rejected):
 | Setting | Mean ATM error | Worst ATM error | Worst single-quote error |
 |---|---|---|---|
 | American, schedule, corrected forward (default) | +0.003 vol pts | 0.07 | 0.31 |
-| European | +0.27 | 0.74 | 1.05 |
-| American, continuous yield | worse than the schedule (tested) | | |
+| European | +0.27 | 0.73 | 1.05 |
+| American, continuous yield | +0.24 | 0.72 | 1.02 |
 
 Other measurements: the early-exercise bias of out-of-the-money quotes is at most
 about 0.5 vol points, except for the two expiries on or next to an ex-date
